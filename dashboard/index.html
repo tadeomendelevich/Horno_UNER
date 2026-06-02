@@ -92,8 +92,8 @@ canvas{border-radius:10px;width:100%;display:block;}
 <div class='footer'>ESP32 &bull; AM2320 &bull; MOC3021 &bull; TIC226 &bull; 50 Hz &bull; HiveMQ Cloud</div>
 </div>
 <script>
-var BROKER='wss://8bdae6c4d1a74a44b3d628e40808611f.s1.eu.hivemq.cloud:8884/mqtt';
-var OPTS={username:'Tadeo',password:'Uner2026',clientId:'webdash_'+Math.random().toString(16).substr(2,8),reconnectPeriod:4000,keepalive:60,clean:true};
+var BROKER='wss://YOUR_HIVEMQ_HOST:8884/mqtt';  // <-- reemplazar con tu host HiveMQ
+var OPTS={username:'YOUR_MQTT_USER',password:'YOUR_MQTT_PASSWORD',clientId:'webdash_'+Math.random().toString(16).substr(2,8),reconnectPeriod:4000,keepalive:60,clean:true};  // <-- reemplazar usuario y contraseña
 var lastData={power:0,delay_us:10000,pulse_us:200,semi_us:10000,zc:0,fire:0,temp:0,hum:0,sensor_ok:false};
 var emergency=false,mqttClient=null;
 function setConnBar(cls,txt,c){var b=document.getElementById('connBar');b.className='conn-bar '+cls;b.innerHTML='<div class="cdot" style="background:'+c+';border-radius:50%;width:8px;height:8px;flex-shrink:0;"></div>'+txt;}

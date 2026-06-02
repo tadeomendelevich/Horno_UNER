@@ -24,14 +24,14 @@
 #include "driver/i2c_master.h"
 
 // ================= WIFI STA =================
-#define WIFI_SSID      "Tupescadorfavorito"
-#define WIFI_PASS      "lucho12345"
+#define WIFI_SSID      "YOUR_WIFI_SSID"       // <-- reemplazar con tu red
+#define WIFI_PASS      "YOUR_WIFI_PASSWORD"    // <-- reemplazar con tu contraseña
 #define MAX_RETRY      10
 
 // ================= MQTT =================
-#define MQTT_BROKER_URI  "mqtts://8bdae6c4d1a74a44b3d628e40808611f.s1.eu.hivemq.cloud:8883"
-#define MQTT_USERNAME    "Tadeo"
-#define MQTT_PASSWORD    "Uner2026"
+#define MQTT_BROKER_URI  "mqtts://YOUR_HIVEMQ_HOST:8883"  // <-- reemplazar con tu host HiveMQ
+#define MQTT_USERNAME    "YOUR_MQTT_USER"      // <-- reemplazar con tu usuario HiveMQ
+#define MQTT_PASSWORD    "YOUR_MQTT_PASSWORD"  // <-- reemplazar con tu contraseña HiveMQ
 #define TOPIC_DATA       "horno/datos"
 #define TOPIC_CONTROL    "horno/control"
 
