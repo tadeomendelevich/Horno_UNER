@@ -24,14 +24,14 @@
 #include "driver/i2c_master.h"
 
 // ================= WIFI STA =================
-#define WIFI_SSID      "YOUR_WIFI_SSID"       // <-- reemplazar con tu red
-#define WIFI_PASS      "YOUR_WIFI_PASSWORD"    // <-- reemplazar con tu contraseña
+#define WIFI_SSID      "FCAL"
+#define WIFI_PASS      "fcalconcordia.06-2019"
 #define MAX_RETRY      10
 
 // ================= MQTT =================
-#define MQTT_BROKER_URI  "mqtts://YOUR_HIVEMQ_HOST:8883"  // <-- reemplazar con tu host HiveMQ
-#define MQTT_USERNAME    "YOUR_MQTT_USER"      // <-- reemplazar con tu usuario HiveMQ
-#define MQTT_PASSWORD    "YOUR_MQTT_PASSWORD"  // <-- reemplazar con tu contraseña HiveMQ
+#define MQTT_BROKER_URI  "mqtts://cf8a47dd.ala.us-east-1.emqxsl.com:8883"
+#define MQTT_USERNAME    "Tadeo"
+#define MQTT_PASSWORD    "Uner2026"
 #define TOPIC_DATA       "horno/datos"
 #define TOPIC_CONTROL    "horno/control"
 
@@ -147,21 +147,19 @@ static esp_err_t am2320_read(float *temperature, float *humidity)
 // ================= INIT I2C =================
 static void i2c_init_am2320(void)
 {
-    i2c_master_bus_config_t bus_config = {
-        .clk_source = I2C_CLK_SRC_DEFAULT,
-        .i2c_port   = I2C_NUM_0,
-        .sda_io_num = I2C_SDA,
-        .scl_io_num = I2C_SCL,
-        .glitch_ignore_cnt = 7,
-        .flags = { .enable_internal_pullup = true },
-    };
+    i2c_master_bus_config_t bus_config = {};
+    bus_config.i2c_port          = I2C_NUM_0;
+    bus_config.sda_io_num        = I2C_SDA;
+    bus_config.scl_io_num        = I2C_SCL;
+    bus_config.clk_source        = I2C_CLK_SRC_DEFAULT;
+    bus_config.glitch_ignore_cnt = 7;
+    bus_config.flags.enable_internal_pullup = true;
     ESP_ERROR_CHECK(i2c_new_master_bus(&bus_config, &i2c_bus_handle));
 
-    i2c_device_config_t dev_config = {
-        .dev_addr_length = I2C_ADDR_BIT_LEN_7,
-        .device_address  = AM2320_ADDR,
-        .scl_speed_hz    = I2C_FREQ_HZ,
-    };
+    i2c_device_config_t dev_config = {};
+    dev_config.dev_addr_length = I2C_ADDR_BIT_LEN_7;
+    dev_config.device_address  = AM2320_ADDR;
+    dev_config.scl_speed_hz    = I2C_FREQ_HZ;
     ESP_ERROR_CHECK(i2c_master_bus_add_device(i2c_bus_handle, &dev_config, &am2320_handle));
     ESP_LOGI(TAG, "I2C listo: SDA GPIO21, SCL GPIO22");
 }
@@ -193,7 +191,7 @@ static void triac_off_callback(void *arg)
 static void triac_fire_callback(void *arg)
 {
     gpio_set_level(TRIAC_PIN, 1);
-    triac_fire_count++;
+    triac_fire_count = triac_fire_count + 1;
     esp_timer_stop(triac_off_timer);
 #if DEMO_LED_FISICO == 1
     esp_timer_start_once(triac_off_timer, DEMO_PULSE_MS * 1000);
@@ -224,7 +222,7 @@ static void triac_task(void *pvParameters)
             if ((now - last_zc_time) < 7000) continue;
 #endif
             last_zc_time = now;
-            zero_cross_count++;
+            zero_cross_count = zero_cross_count + 1;
 
             int p = potencia_percent;
             if (p <= 0) { gpio_set_level(TRIAC_PIN, 0); retardo_us = SEMICYCLE_US; continue; }
@@ -238,13 +236,14 @@ static void triac_task(void *pvParameters)
             esp_timer_start_once(triac_fire_timer, demo_r);
 #else
             esp_timer_stop(triac_fire_timer);
-            esp_timer_start_once(triac_fire_timer, retardo_us);
+            esp_timer_start_once(triac_fire_timer, (int64_t)retardo_us);
 #endif
         }
     }
 }
 
 // ================= SIMULADOR CRUCE =================
+#if SIMULAR_CRUCE == 1
 static void fake_zero_cross_task(void *pvParameters)
 {
     uint32_t event = 1;
@@ -257,33 +256,36 @@ static void fake_zero_cross_task(void *pvParameters)
 #endif
     }
 }
+#endif
 
 // ================= INIT TRIAC =================
 static void triac_control_init(void)
 {
-    gpio_config_t triac_conf = {
-        .pin_bit_mask  = (1ULL << TRIAC_PIN),
-        .mode          = GPIO_MODE_OUTPUT,
-        .pull_up_en    = GPIO_PULLUP_DISABLE,
-        .pull_down_en  = GPIO_PULLDOWN_ENABLE,
-        .intr_type     = GPIO_INTR_DISABLE
-    };
+    gpio_config_t triac_conf = {};
+    triac_conf.pin_bit_mask = (1ULL << TRIAC_PIN);
+    triac_conf.mode         = GPIO_MODE_OUTPUT;
+    triac_conf.pull_up_en   = GPIO_PULLUP_DISABLE;
+    triac_conf.pull_down_en = GPIO_PULLDOWN_ENABLE;
+    triac_conf.intr_type    = GPIO_INTR_DISABLE;
     ESP_ERROR_CHECK(gpio_config(&triac_conf));
     gpio_set_level(TRIAC_PIN, 0);
 
-    gpio_config_t zc_conf = {
-        .pin_bit_mask  = (1ULL << ZERO_CROSS_PIN),
-        .mode          = GPIO_MODE_INPUT,
-        .pull_up_en    = GPIO_PULLUP_DISABLE,
-        .pull_down_en  = GPIO_PULLDOWN_DISABLE,
-        .intr_type     = GPIO_INTR_POSEDGE
-    };
+    gpio_config_t zc_conf = {};
+    zc_conf.pin_bit_mask = (1ULL << ZERO_CROSS_PIN);
+    zc_conf.mode         = GPIO_MODE_INPUT;
+    zc_conf.pull_up_en   = GPIO_PULLUP_DISABLE;
+    zc_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
+    zc_conf.intr_type    = GPIO_INTR_POSEDGE;
     ESP_ERROR_CHECK(gpio_config(&zc_conf));
 
     zero_cross_queue = xQueueCreate(20, sizeof(uint32_t));
 
-    esp_timer_create_args_t fire_args = { .callback = &triac_fire_callback, .name = "triac_fire" };
-    esp_timer_create_args_t off_args  = { .callback = &triac_off_callback,  .name = "triac_off"  };
+    esp_timer_create_args_t fire_args = {};
+    fire_args.callback = &triac_fire_callback;
+    fire_args.name     = "triac_fire";
+    esp_timer_create_args_t off_args = {};
+    off_args.callback  = &triac_off_callback;
+    off_args.name      = "triac_off";
     ESP_ERROR_CHECK(esp_timer_create(&fire_args, &triac_fire_timer));
     ESP_ERROR_CHECK(esp_timer_create(&off_args,  &triac_off_timer));
 
@@ -356,7 +358,7 @@ static void mqtt_init(void)
     mqtt_cfg.credentials.authentication.password = MQTT_PASSWORD;
 
     mqtt_client = esp_mqtt_client_init(&mqtt_cfg);
-    esp_mqtt_client_register_event(mqtt_client, ESP_EVENT_ANY_ID, mqtt_event_handler, NULL);
+    esp_mqtt_client_register_event(mqtt_client, (esp_mqtt_event_id_t)ESP_EVENT_ANY_ID, mqtt_event_handler, NULL);
     esp_mqtt_client_start(mqtt_client);
     ESP_LOGI(TAG, "MQTT iniciado: %s", MQTT_BROKER_URI);
 }
@@ -372,8 +374,8 @@ static void mqtt_publish_task(void *pvParameters)
                 "\"delay_us\":%d,\"pulse_us\":%d,\"semi_us\":%d,"
                 "\"zc\":%lu,\"fire\":%lu}",
                 sensor_ok ? "true" : "false",
-                last_temp, last_hum, potencia_percent,
-                retardo_us, TRIAC_PULSE_US, SEMICYCLE_US,
+                last_temp, last_hum, (int)potencia_percent,
+                (int)retardo_us, TRIAC_PULSE_US, SEMICYCLE_US,
                 (unsigned long)zero_cross_count,
                 (unsigned long)triac_fire_count);
             esp_mqtt_client_publish(mqtt_client, TOPIC_DATA, payload, 0, 1, 0);
@@ -399,7 +401,7 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t e
     }
     else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t *ev = (ip_event_got_ip_t *)event_data;
-        ESP_LOGI(TAG, "WiFi OK. IP local: " IPSTR " (acceso local disponible)", IP2STR(&ev->ip_info.ip));
+        ESP_LOGI(TAG, "WiFi OK. IP: " IPSTR, IP2STR(&ev->ip_info.ip));
         retry_count = 0;
         xEventGroupSetBits(wifi_event_group, WIFI_CONNECTED_BIT);
     }
@@ -423,6 +425,9 @@ static void wifi_init_sta(void)
     wifi_config_t wifi_config = {};
     strncpy((char *)wifi_config.sta.ssid,     WIFI_SSID, sizeof(wifi_config.sta.ssid));
     strncpy((char *)wifi_config.sta.password, WIFI_PASS, sizeof(wifi_config.sta.password));
+    wifi_config.sta.threshold.authmode  = WIFI_AUTH_WPA2_PSK;
+    wifi_config.sta.pmf_cfg.capable     = true;
+    wifi_config.sta.pmf_cfg.required    = false;
 
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
@@ -541,8 +546,8 @@ static esp_err_t data_get_handler(httpd_req_t *req)
         "{\"sensor_ok\":%s,\"temp\":%.1f,\"hum\":%.1f,\"power\":%d,"
         "\"delay_us\":%d,\"pulse_us\":%d,\"semi_us\":%d,\"zc\":%lu,\"fire\":%lu}",
         sensor_ok ? "true" : "false",
-        last_temp, last_hum, potencia_percent,
-        retardo_us, TRIAC_PULSE_US, SEMICYCLE_US,
+        last_temp, last_hum, (int)potencia_percent,
+        (int)retardo_us, TRIAC_PULSE_US, SEMICYCLE_US,
         (unsigned long)zero_cross_count,
         (unsigned long)triac_fire_count);
     return httpd_resp_send(req, response, HTTPD_RESP_USE_STRLEN);
