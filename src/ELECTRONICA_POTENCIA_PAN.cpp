@@ -25,8 +25,8 @@
 #include "driver/i2c_master.h"
 
 // ================= WIFI =================
-#define WIFI_SSID_DEFAULT  "MEGACABLE FIBRA-2.4G-ckd0"
-#define WIFI_PASS_DEFAULT  "djg19dlk"
+#define WIFI_SSID_DEFAULT  "TU_RED_WIFI"
+#define WIFI_PASS_DEFAULT  "TU_PASSWORD"
 #define MAX_RETRY          10
 
 // ================= WIFI PROVISIONING =================
