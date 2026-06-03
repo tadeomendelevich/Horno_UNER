@@ -25,8 +25,8 @@
 #include "driver/i2c_master.h"
 
 // ================= WIFI =================
-#define WIFI_SSID_DEFAULT  "FCAL"
-#define WIFI_PASS_DEFAULT  "fcalconcordia.06-2019"
+#define WIFI_SSID_DEFAULT  "MEGACABLE FIBRA-2.4G-ckd0"
+#define WIFI_PASS_DEFAULT  "djg19dlk"
 #define MAX_RETRY          10
 
 // ================= WIFI PROVISIONING =================
