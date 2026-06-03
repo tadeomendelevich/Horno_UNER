@@ -15,6 +15,7 @@
 #include "esp_wifi.h"
 #include "esp_http_server.h"
 #include "nvs_flash.h"
+#include "nvs.h"
 #include "esp_rom_sys.h"
 #include "esp_timer.h"
 #include "mqtt_client.h"
@@ -23,10 +24,19 @@
 #include "driver/gpio.h"
 #include "driver/i2c_master.h"
 
-// ================= WIFI STA =================
-#define WIFI_SSID      "FCAL"
-#define WIFI_PASS      "fcalconcordia.06-2019"
-#define MAX_RETRY      10
+// ================= WIFI =================
+#define WIFI_SSID_DEFAULT  "FCAL"
+#define WIFI_PASS_DEFAULT  "fcalconcordia.06-2019"
+#define MAX_RETRY          10
+
+// ================= WIFI PROVISIONING =================
+#define AP_SSID_NAME    "Horno-Config"
+#define AP_SSID_PASS    "horno1234"
+#define NVS_WIFI_NS     "wifi_cfg"
+#define NVS_KEY_SSID    "ssid"
+#define NVS_KEY_PASS    "pass"
+#define NVS_KEY_SSID_BAK "ssid_bak"
+#define NVS_KEY_PASS_BAK "pass_bak"
 
 // ================= MQTT =================
 #define MQTT_BROKER_URI  "mqtts://cf8a47dd.ala.us-east-1.emqxsl.com:8883"
@@ -58,6 +68,9 @@ static const char *TAG = "PAN_CONTROL";
 // WiFi
 static EventGroupHandle_t wifi_event_group;
 static int retry_count = 0;
+static bool in_ap_mode = false;
+static char g_ssid[33] = {0};
+static char g_pass[65] = {0};
 #define WIFI_CONNECTED_BIT BIT0
 #define WIFI_FAIL_BIT      BIT1
 
@@ -82,6 +95,73 @@ static volatile uint32_t triac_fire_count = 0;
 static float last_temp = 0.0f;
 static float last_hum  = 0.0f;
 static bool  sensor_ok = false;
+
+// ================= NVS WIFI =================
+static bool nvs_load_wifi(char *ssid, char *pass)
+{
+    nvs_handle_t h;
+    if (nvs_open(NVS_WIFI_NS, NVS_READONLY, &h) != ESP_OK) return false;
+    size_t sl = 33, pl = 65;
+    bool ok = (nvs_get_str(h, NVS_KEY_SSID, ssid, &sl) == ESP_OK) &&
+              (nvs_get_str(h, NVS_KEY_PASS, pass, &pl) == ESP_OK) &&
+              strlen(ssid) > 0;
+    nvs_close(h);
+    return ok;
+}
+
+static void nvs_save_wifi(const char *ssid, const char *pass)
+{
+    nvs_handle_t h;
+    if (nvs_open(NVS_WIFI_NS, NVS_READWRITE, &h) != ESP_OK) return;
+    nvs_set_str(h, NVS_KEY_SSID, ssid);
+    nvs_set_str(h, NVS_KEY_PASS, pass);
+    nvs_commit(h);
+    nvs_close(h);
+    ESP_LOGI(TAG, "WiFi guardado: %s", ssid);
+}
+
+static bool nvs_load_wifi_backup(char *ssid, char *pass)
+{
+    nvs_handle_t h;
+    if (nvs_open(NVS_WIFI_NS, NVS_READONLY, &h) != ESP_OK) return false;
+    size_t sl = 33, pl = 65;
+    bool ok = (nvs_get_str(h, NVS_KEY_SSID_BAK, ssid, &sl) == ESP_OK) &&
+              (nvs_get_str(h, NVS_KEY_PASS_BAK, pass, &pl) == ESP_OK) &&
+              strlen(ssid) > 0;
+    nvs_close(h);
+    return ok;
+}
+
+static void nvs_save_wifi_backup(const char *ssid, const char *pass)
+{
+    nvs_handle_t h;
+    if (nvs_open(NVS_WIFI_NS, NVS_READWRITE, &h) != ESP_OK) return;
+    nvs_set_str(h, NVS_KEY_SSID_BAK, ssid);
+    nvs_set_str(h, NVS_KEY_PASS_BAK, pass);
+    nvs_commit(h);
+    nvs_close(h);
+    ESP_LOGI(TAG, "WiFi backup guardado: %s", ssid);
+}
+
+// ================= URL DECODE =================
+static void urldecode(char *dst, const char *src, size_t max)
+{
+    size_t i = 0;
+    while (*src && i < max - 1) {
+        if (*src == '%' && src[1] && src[2]) {
+            char hex[3] = {src[1], src[2], 0};
+            *dst++ = (char)strtol(hex, NULL, 16);
+            src += 3;
+        } else if (*src == '+') {
+            *dst++ = ' ';
+            src++;
+        } else {
+            *dst++ = *src++;
+        }
+        i++;
+    }
+    *dst = '\0';
+}
 
 // ================= RETARDO TRIAC =================
 static int calcular_retardo_us(int p)
@@ -242,7 +322,6 @@ static void triac_task(void *pvParameters)
     }
 }
 
-// ================= SIMULADOR CRUCE =================
 #if SIMULAR_CRUCE == 1
 static void fake_zero_cross_task(void *pvParameters)
 {
@@ -311,7 +390,7 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base, int32_t event_i
 
         case MQTT_EVENT_CONNECTED:
             mqtt_connected = true;
-            ESP_LOGI(TAG, "MQTT conectado a HiveMQ Cloud");
+            ESP_LOGI(TAG, "MQTT conectado");
             esp_mqtt_client_subscribe(mqtt_client, TOPIC_CONTROL, 1);
             break;
 
@@ -408,45 +487,146 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t e
 }
 
 // ================= INIT WIFI STA =================
-static void wifi_init_sta(void)
+static void wifi_stack_init(void)
 {
     wifi_event_group = xEventGroupCreate();
-
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
     esp_netif_create_default_wifi_sta();
-
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&cfg));
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID,    &wifi_event_handler, NULL, NULL));
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT,   IP_EVENT_STA_GOT_IP, &wifi_event_handler, NULL, NULL));
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+    ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
+}
 
-    ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT,   ESP_EVENT_ANY_ID,    &wifi_event_handler, NULL, NULL));
-    ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT,     IP_EVENT_STA_GOT_IP, &wifi_event_handler, NULL, NULL));
+// Intenta conectar con las credenciales dadas. Llama esp_wifi_stop() antes si ya estaba corriendo.
+static bool wifi_connect_with(const char *ssid, const char *pass, bool already_started)
+{
+    if (already_started) {
+        esp_wifi_stop();
+        vTaskDelay(pdMS_TO_TICKS(500));
+    }
+
+    retry_count = 0;
+    xEventGroupClearBits(wifi_event_group, WIFI_CONNECTED_BIT | WIFI_FAIL_BIT);
 
     wifi_config_t wifi_config = {};
-    strncpy((char *)wifi_config.sta.ssid,     WIFI_SSID, sizeof(wifi_config.sta.ssid));
-    strncpy((char *)wifi_config.sta.password, WIFI_PASS, sizeof(wifi_config.sta.password));
-    wifi_config.sta.threshold.authmode  = WIFI_AUTH_WPA2_PSK;
-    wifi_config.sta.pmf_cfg.capable     = true;
-    wifi_config.sta.pmf_cfg.required    = false;
+    strncpy((char *)wifi_config.sta.ssid,     ssid, sizeof(wifi_config.sta.ssid));
+    strncpy((char *)wifi_config.sta.password, pass, sizeof(wifi_config.sta.password));
+    wifi_config.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
+    wifi_config.sta.pmf_cfg.capable    = true;
+    wifi_config.sta.pmf_cfg.required   = false;
 
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
     ESP_ERROR_CHECK(esp_wifi_start());
-    ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
 
-    ESP_LOGI(TAG, "Conectando a WiFi '%s'...", WIFI_SSID);
+    ESP_LOGI(TAG, "Conectando a WiFi '%s'...", ssid);
 
     EventBits_t bits = xEventGroupWaitBits(wifi_event_group,
         WIFI_CONNECTED_BIT | WIFI_FAIL_BIT, pdFALSE, pdFALSE, portMAX_DELAY);
 
     if (bits & WIFI_CONNECTED_BIT) {
-        ESP_LOGI(TAG, "WiFi conectado");
-    } else {
-        ESP_LOGE(TAG, "Fallo WiFi");
+        ESP_LOGI(TAG, "WiFi conectado: %s", ssid);
+        return true;
     }
+    ESP_LOGE(TAG, "Fallo WiFi '%s'", ssid);
+    return false;
 }
 
-// ================= WEB ROOT (acceso local) =================
+// ================= MODO AP (CONFIGURACION) =================
+static void wifi_start_ap(void)
+{
+    esp_netif_create_default_wifi_ap();
+
+    wifi_config_t ap_config = {};
+    strncpy((char *)ap_config.ap.ssid,     AP_SSID_NAME, sizeof(ap_config.ap.ssid));
+    strncpy((char *)ap_config.ap.password, AP_SSID_PASS, sizeof(ap_config.ap.password));
+    ap_config.ap.ssid_len       = strlen(AP_SSID_NAME);
+    ap_config.ap.authmode       = WIFI_AUTH_WPA2_PSK;
+    ap_config.ap.max_connection = 4;
+
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_AP));
+    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &ap_config));
+    ESP_ERROR_CHECK(esp_wifi_start());
+
+    ESP_LOGW(TAG, "Modo AP activo: SSID='%s' Pass='%s' IP=192.168.4.1", AP_SSID_NAME, AP_SSID_PASS);
+}
+
+// ================= PORTAL DE CONFIGURACION =================
+static esp_err_t config_root_handler(httpd_req_t *req)
+{
+    char html[2048];
+    snprintf(html, sizeof(html),
+        "<!DOCTYPE html><html lang='es'><head>"
+        "<meta charset='UTF-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
+        "<title>Configurar WiFi - Horno</title>"
+        "<style>"
+        "*{box-sizing:border-box;margin:0;padding:0;}"
+        "body{font-family:sans-serif;background:#0f172a;color:#f8fafc;display:flex;justify-content:center;align-items:center;min-height:100vh;padding:16px;}"
+        ".card{background:#1e293b;border-radius:16px;padding:28px;border:1px solid #334155;width:100%%;max-width:400px;}"
+        "h2{color:#60a5fa;text-align:center;margin-bottom:8px;font-size:20px;}"
+        "p{color:#64748b;text-align:center;font-size:13px;margin-bottom:24px;}"
+        "label{display:block;font-size:12px;color:#94a3b8;margin-bottom:6px;letter-spacing:1px;text-transform:uppercase;}"
+        "input{width:100%%;padding:12px;border-radius:8px;border:1px solid #334155;background:#0f172a;color:#f8fafc;font-size:15px;margin-bottom:16px;outline:none;}"
+        "button{width:100%%;padding:14px;border-radius:10px;border:none;background:#3b82f6;color:#fff;font-size:16px;font-weight:700;cursor:pointer;}"
+        ".net{background:#0f172a;border-radius:8px;padding:10px 14px;margin-bottom:8px;border:1px solid #334155;font-size:14px;color:#94a3b8;}"
+        ".curr{color:#fbbf24;font-size:12px;margin-bottom:20px;text-align:center;}"
+        "</style></head>"
+        "<body><div class='card'>"
+        "<h2>Configurar WiFi</h2>"
+        "<p>Conectate a la red deseada</p>"
+        "<div class='curr'>Red actual: <b>%s</b></div>"
+        "<form action='/save' method='get'>"
+        "<label>Nombre de red (SSID)</label>"
+        "<input type='text' name='ssid' placeholder='NombreDeRed' required>"
+        "<label>Contrasena</label>"
+        "<input type='password' name='pass' placeholder='Contrasena'>"
+        "<button type='submit'>Guardar y reiniciar</button>"
+        "</form>"
+        "</div></body></html>",
+        g_ssid);
+
+    httpd_resp_set_type(req, "text/html");
+    return httpd_resp_send(req, html, HTTPD_RESP_USE_STRLEN);
+}
+
+static esp_err_t config_save_handler(httpd_req_t *req)
+{
+    char query[256], ssid_enc[64], pass_enc[128];
+    char new_ssid[33] = {0}, new_pass[65] = {0};
+
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
+        if (httpd_query_key_value(query, "ssid", ssid_enc, sizeof(ssid_enc)) == ESP_OK) {
+            urldecode(new_ssid, ssid_enc, sizeof(new_ssid));
+        }
+        if (httpd_query_key_value(query, "pass", pass_enc, sizeof(pass_enc)) == ESP_OK) {
+            urldecode(new_pass, pass_enc, sizeof(new_pass));
+        }
+    }
+
+    if (strlen(new_ssid) == 0) {
+        httpd_resp_send(req, "<html><body><h2>Error: SSID vacio</h2><a href='/'>Volver</a></body></html>", HTTPD_RESP_USE_STRLEN);
+        return ESP_OK;
+    }
+
+    nvs_save_wifi(new_ssid, new_pass);
+
+    const char *resp =
+        "<!DOCTYPE html><html><head><meta charset='UTF-8'>"
+        "<style>body{font-family:sans-serif;background:#0f172a;color:#f8fafc;display:flex;justify-content:center;align-items:center;height:100vh;}"
+        ".card{background:#1e293b;border-radius:16px;padding:28px;text-align:center;border:1px solid #334155;}"
+        "h2{color:#22c55e;margin-bottom:12px;}p{color:#94a3b8;}</style></head>"
+        "<body><div class='card'><h2>Guardado!</h2><p>Reiniciando en 2 segundos...</p></div></body></html>";
+    httpd_resp_send(req, resp, HTTPD_RESP_USE_STRLEN);
+
+    vTaskDelay(pdMS_TO_TICKS(2000));
+    esp_restart();
+    return ESP_OK;
+}
+
+// ================= WEB ROOT (acceso local normal) =================
 static esp_err_t root_get_handler(httpd_req_t *req)
 {
     static const char html[] =
@@ -471,6 +651,7 @@ static esp_err_t root_get_handler(httpd_req_t *req)
         ".btns{display:grid;grid-template-columns:repeat(5,1fr);gap:7px;margin-bottom:14px;}"
         ".btn{padding:10px 4px;border-radius:9px;border:1px solid #334155;background:#0f172a;color:#94a3b8;font-size:13px;font-weight:600;cursor:pointer;}"
         ".emg{width:100%;padding:15px;border-radius:12px;border:none;background:linear-gradient(135deg,#dc2626,#991b1b);color:white;font-size:17px;font-weight:800;cursor:pointer;letter-spacing:0.5px;}"
+        ".wifi-btn{width:100%;padding:11px;border-radius:10px;border:1px solid #334155;background:#0f172a;color:#60a5fa;font-size:14px;font-weight:600;cursor:pointer;margin-top:10px;}"
         ".badge{display:inline-flex;align-items:center;gap:7px;font-size:13px;font-weight:600;padding:6px 16px;border-radius:20px;margin-bottom:14px;}"
         ".b-ok{background:#052e16;color:#22c55e;border:1px solid #15803d;}"
         ".b-err{background:#2d0d0d;color:#f87171;border:1px solid #991b1b;}"
@@ -478,7 +659,6 @@ static esp_err_t root_get_handler(httpd_req_t *req)
         ".d-ok{background:#22c55e;box-shadow:0 0 7px #22c55e;}"
         ".d-err{background:#f87171;}"
         ".dbg{font-size:11px;color:#475569;font-family:monospace;background:#0f172a;padding:7px 10px;border-radius:8px;margin-top:12px;border:1px solid #1e293b;}"
-        ".note{font-size:11px;color:#475569;text-align:center;margin-top:10px;}"
         "</style></head>"
         "<body><div class='wrap'>"
         "<div class='card'>"
@@ -499,8 +679,8 @@ static esp_err_t root_get_handler(httpd_req_t *req)
         "<button class='btn' style='border-color:#064e3b;color:#6ee7b7;' onclick='set(100)'>MAX</button>"
         "</div>"
         "<button class='emg' onclick='set(0)'>&#9632; PARADA DE EMERGENCIA</button>"
+        "<button class='wifi-btn' onclick='location.href=\"/wifi\"'>&#9881; Cambiar red WiFi</button>"
         "<div id='dbg' class='dbg'>Esperando datos...</div>"
-        "<p class='note'>Acceso remoto disponible desde el dashboard en Vercel</p>"
         "</div></div>"
         "<script>"
         "function set(v){"
@@ -516,7 +696,7 @@ static esp_err_t root_get_handler(httpd_req_t *req)
         "document.getElementById('p').innerHTML=j.power+'%';"
         "document.getElementById('sl').value=j.power;"
         "document.getElementById('dbg').innerHTML="
-        "'Retardo: '+j.delay_us+' us | Pulso: '+j.pulse_us+' us | ZC: '+j.zc+' | Fires: '+j.fire;"
+        "'Retardo: '+j.delay_us+' us | ZC: '+j.zc+' | Fires: '+j.fire;"
         "var st=document.getElementById('st');"
         "if(j.sensor_ok){"
         "st.innerHTML='<div class=\"dot d-ok\"></div>Sensor OK';"
@@ -564,7 +744,6 @@ static esp_err_t set_get_handler(httpd_req_t *req)
             if (p > 100) p = 100;
             potencia_percent = p;
             retardo_us = calcular_retardo_us(p);
-            ESP_LOGI(TAG, "Potencia (HTTP local): %d%%", p);
         }
     }
     httpd_resp_set_type(req, "application/json");
@@ -572,7 +751,7 @@ static esp_err_t set_get_handler(httpd_req_t *req)
 }
 
 // ================= WEB SERVER =================
-static httpd_handle_t start_webserver(void)
+static httpd_handle_t start_webserver(bool ap_mode_active)
 {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port      = 80;
@@ -586,14 +765,27 @@ static httpd_handle_t start_webserver(void)
         return NULL;
     }
 
-    httpd_uri_t uris[] = {
-        { .uri = "/",     .method = HTTP_GET, .handler = root_get_handler, .user_ctx = NULL },
-        { .uri = "/data", .method = HTTP_GET, .handler = data_get_handler, .user_ctx = NULL },
-        { .uri = "/set",  .method = HTTP_GET, .handler = set_get_handler,  .user_ctx = NULL },
-    };
-    for (int i = 0; i < 3; i++) httpd_register_uri_handler(server, &uris[i]);
+    if (ap_mode_active) {
+        // Solo portal de configuracion
+        httpd_uri_t uris[] = {
+            { .uri = "/",     .method = HTTP_GET, .handler = config_root_handler, .user_ctx = NULL },
+            { .uri = "/save", .method = HTTP_GET, .handler = config_save_handler, .user_ctx = NULL },
+        };
+        for (int i = 0; i < 2; i++) httpd_register_uri_handler(server, &uris[i]);
+        ESP_LOGI(TAG, "Portal de config en http://192.168.4.1");
+    } else {
+        // Modo normal + endpoint para cambiar WiFi
+        httpd_uri_t uris[] = {
+            { .uri = "/",     .method = HTTP_GET, .handler = root_get_handler,    .user_ctx = NULL },
+            { .uri = "/data", .method = HTTP_GET, .handler = data_get_handler,    .user_ctx = NULL },
+            { .uri = "/set",  .method = HTTP_GET, .handler = set_get_handler,     .user_ctx = NULL },
+            { .uri = "/wifi", .method = HTTP_GET, .handler = config_root_handler, .user_ctx = NULL },
+            { .uri = "/save", .method = HTTP_GET, .handler = config_save_handler, .user_ctx = NULL },
+        };
+        for (int i = 0; i < 5; i++) httpd_register_uri_handler(server, &uris[i]);
+        ESP_LOGI(TAG, "Servidor web listo en puerto 80");
+    }
 
-    ESP_LOGI(TAG, "Servidor web local listo en puerto 80");
     return server;
 }
 
@@ -609,15 +801,47 @@ extern "C" void app_main(void)
 
     i2c_init_am2320();
     triac_control_init();
-    wifi_init_sta();
-    mqtt_init();
 
-    xTaskCreate(sensor_task,       "sensor_task",  4096, NULL, 5, NULL);
-    xTaskCreate(mqtt_publish_task, "mqtt_publish", 4096, NULL, 5, NULL);
+    // Cargar credenciales WiFi desde NVS o usar las de fabrica
+    if (!nvs_load_wifi(g_ssid, g_pass)) {
+        strncpy(g_ssid, WIFI_SSID_DEFAULT, sizeof(g_ssid));
+        strncpy(g_pass, WIFI_PASS_DEFAULT, sizeof(g_pass));
+        ESP_LOGI(TAG, "Usando credenciales por defecto: %s", g_ssid);
+    } else {
+        ESP_LOGI(TAG, "Credenciales cargadas de NVS: %s", g_ssid);
+    }
 
-    start_webserver();
+    wifi_stack_init();
 
-    ESP_LOGI(TAG, "Sistema listo.");
-    ESP_LOGI(TAG, "  - Control remoto: dashboard Vercel via MQTT");
-    ESP_LOGI(TAG, "  - Control local:  http://<IP_local>");
+    bool connected = wifi_connect_with(g_ssid, g_pass, false);
+
+    if (!connected) {
+        char bak_ssid[33] = {0}, bak_pass[65] = {0};
+        if (nvs_load_wifi_backup(bak_ssid, bak_pass) && strcmp(bak_ssid, g_ssid) != 0) {
+            ESP_LOGW(TAG, "Red '%s' fallo — intentando red anterior: '%s'", g_ssid, bak_ssid);
+            connected = wifi_connect_with(bak_ssid, bak_pass, true);
+            if (connected) {
+                // Revertir credenciales al backup que funcionó
+                strncpy(g_ssid, bak_ssid, sizeof(g_ssid));
+                strncpy(g_pass, bak_pass, sizeof(g_pass));
+                nvs_save_wifi(bak_ssid, bak_pass);
+                ESP_LOGW(TAG, "Revertido a red anterior: '%s'", bak_ssid);
+            }
+        }
+    }
+
+    if (connected) {
+        nvs_save_wifi_backup(g_ssid, g_pass);
+        in_ap_mode = false;
+        mqtt_init();
+        xTaskCreate(sensor_task,       "sensor_task",  4096, NULL, 5, NULL);
+        xTaskCreate(mqtt_publish_task, "mqtt_publish", 4096, NULL, 5, NULL);
+        start_webserver(false);
+        ESP_LOGI(TAG, "Sistema listo. Control remoto via MQTT, local via HTTP.");
+    } else {
+        in_ap_mode = true;
+        wifi_start_ap();
+        start_webserver(true);
+        ESP_LOGW(TAG, "MODO CONFIG: conectate a '%s' y entra a http://192.168.4.1", AP_SSID_NAME);
+    }
 }
