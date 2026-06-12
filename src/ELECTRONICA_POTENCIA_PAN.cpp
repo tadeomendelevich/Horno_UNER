@@ -959,7 +959,7 @@ static void lcd_update_task(void *pvParameters)
 
                 case 0: { // Temperatura + humedad | Barra de potencia
                     if (sensor_ok) {
-                        snprintf((char*)line0, 17, "\x03%5.1f\xDFC \x04%5.1f%%",
+                        snprintf((char*)line0, 17, "\x03%5.1f" "\xDF" "C \x04%5.1f%%",
                                  last_temp, last_hum);
                     } else {
                         snprintf((char*)line0, 17, "\x03 Sin sensor    ");
