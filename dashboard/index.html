@@ -87,7 +87,7 @@ canvas{border-radius:10px;width:100%;display:block;}
     <button class='btn btn-max' onclick='setPower(100)'>MAX</button>
   </div>
   <button id='emergBtn' class='emg' onclick='emergencyStop()'>&#9632; PARADA DE EMERGENCIA</button>
-  <button class='lcd-btn' onclick='nextScreen()'>&#8644; Cambiar pantalla LCD</button>
+  <button id='lcdBtn' class='lcd-btn' onclick='nextScreen()'>&#8644; Cambiar pantalla LCD</button>
   <div id='debug' class='dbg'>Esperando datos del horno...</div>
   <div class='chart-lbl'>Senal de disparo TRIAC &mdash; 50 Hz</div>
   <canvas id='wave' width='460' height='200'></canvas>
@@ -122,7 +122,18 @@ function initMQTT(){
   });
 }
 function pub(v){if(mqttClient&&mqttClient.connected)mqttClient.publish('horno/control',JSON.stringify({power:v}),{qos:1});}
-function nextScreen(){if(mqttClient&&mqttClient.connected)mqttClient.publish('horno/control',JSON.stringify({screen:'next'}),{qos:1});}
+function nextScreen(){
+  var b=document.getElementById('lcdBtn');
+  if(mqttClient&&mqttClient.connected){
+    mqttClient.publish('horno/control',JSON.stringify({screen:'next'}),{qos:1},function(err){
+      if(err){b.textContent='Error: '+err.message;setTimeout(function(){b.innerHTML='&#8644; Cambiar pantalla LCD';},2000);}
+      else{b.textContent='Enviado ✓';setTimeout(function(){b.innerHTML='&#8644; Cambiar pantalla LCD';},1000);}
+    });
+  }else{
+    b.textContent='Sin conexion MQTT';
+    setTimeout(function(){b.innerHTML='&#8644; Cambiar pantalla LCD';},2000);
+  }
+}
 function setPower(v){if(emergency)return;v=parseInt(v);document.getElementById('slider').value=v;document.getElementById('pot').innerHTML=v+' %';lastData.power=v;lastData.delay_us=Math.max(200,((100-v)*10000/100));pub(v);drawWave();}
 function emergencyStop(){emergency=true;var b=document.getElementById('emergBtn');b.classList.add('stopped');b.innerHTML='&#9632; PARADA ACTIVADA &mdash; Toca para reactivar';b.onclick=reactivar;pub(0);document.getElementById('slider').value=0;document.getElementById('pot').innerHTML='0 %';}
 function reactivar(){emergency=false;var b=document.getElementById('emergBtn');b.classList.remove('stopped');b.innerHTML='&#9632; PARADA DE EMERGENCIA';b.onclick=emergencyStop;}
