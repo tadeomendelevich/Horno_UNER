@@ -57,8 +57,12 @@
 #define AM2320_ADDR         0x5C
 
 // ================= LCD 16x2 I2C =================
-#define LCD_ADDR        0x27   // cambiar a 0x3F si no responde
-#define LCD_NUM_SCREENS 3
+#define LCD_ADDR            0x27   // cambiar a 0x3F si no responde
+#define LCD_VISIBLE_CHARS   16
+#define LCD_PAGE_COUNT      7
+#define LCD_MENU_ITEMS      7
+#define BUTTON_LONG_PRESS_MS 900
+#define LCD_SCROLL_STEP_MS  350
 // Bits PCF8574 → HD44780: P7=D7 P6=D6 P5=D5 P4=D4 P3=BL P2=EN P1=RW P0=RS
 #define LCD_BL   0x08
 #define LCD_EN   0x04
@@ -106,9 +110,38 @@ static float last_temp = 0.0f;
 static float last_hum  = 0.0f;
 static bool  sensor_ok = false;
 
-// LCD pantallas
-static volatile int lcd_screen = 0;
+typedef enum {
+    UI_MODE_PAGES = 0,
+    UI_MODE_MENU  = 1,
+} ui_mode_t;
+
+typedef enum {
+    LCD_PAGE_HOME = 0,
+    LCD_PAGE_CLIMATE,
+    LCD_PAGE_POWER,
+    LCD_PAGE_NETWORK,
+    LCD_PAGE_TIMING,
+    LCD_PAGE_COUNTERS,
+    LCD_PAGE_SYSTEM,
+} lcd_page_t;
+
+typedef enum {
+    LCD_MENU_RESUME = 0,
+    LCD_MENU_HOME,
+    LCD_MENU_CLIMATE,
+    LCD_MENU_POWER,
+    LCD_MENU_NETWORK,
+    LCD_MENU_COUNTERS,
+    LCD_MENU_SYSTEM,
+} lcd_menu_item_t;
+
+// LCD UI
+static volatile int ui_page = LCD_PAGE_HOME;
+static volatile int ui_mode = UI_MODE_PAGES;
+static volatile int ui_menu_index = 0;
 static char g_ip[16] = "---";
+static char g_lcd_line0[LCD_VISIBLE_CHARS + 1] = "Iniciando...";
+static char g_lcd_line1[LCD_VISIBLE_CHARS + 1] = "Espera...";
 
 // ================= NVS WIFI =================
 static bool nvs_load_wifi(char *ssid, char *pass)
@@ -304,9 +337,207 @@ static void lcd_set_cursor(uint8_t col, uint8_t row) {
 // Escribe exactamente 16 chars (rellena con espacios si es mas corto)
 static void lcd_print_line(uint8_t row, const char *str) {
     lcd_set_cursor(0, row);
-    for (int i = 0; i < 16; i++) {
+    for (int i = 0; i < LCD_VISIBLE_CHARS; i++) {
         lcd_char(str[i] ? (uint8_t)str[i] : ' ');
     }
+}
+
+static int clamp_percent(int value)
+{
+    if (value < 0) return 0;
+    if (value > 100) return 100;
+    return value;
+}
+
+static void set_power_percent(int value)
+{
+    int p = clamp_percent(value);
+    potencia_percent = p;
+    retardo_us = calcular_retardo_us(p);
+}
+
+static uint32_t get_uptime_s(void)
+{
+    return (uint32_t)(esp_timer_get_time() / 1000000LL);
+}
+
+static const char *lcd_page_label(int page)
+{
+    switch (page) {
+        case LCD_PAGE_HOME:     return "Resumen";
+        case LCD_PAGE_CLIMATE:  return "Clima";
+        case LCD_PAGE_POWER:    return "Potencia";
+        case LCD_PAGE_NETWORK:  return "WiFi";
+        case LCD_PAGE_TIMING:   return "Temporizado";
+        case LCD_PAGE_COUNTERS: return "Contadores";
+        case LCD_PAGE_SYSTEM:   return "Sistema";
+        default:                return "Resumen";
+    }
+}
+
+static const char *lcd_menu_label(int item)
+{
+    switch (item) {
+        case LCD_MENU_RESUME:   return "Volver";
+        case LCD_MENU_HOME:     return "Ir a Resumen";
+        case LCD_MENU_CLIMATE:  return "Ver Clima";
+        case LCD_MENU_POWER:    return "Ver Potencia";
+        case LCD_MENU_NETWORK:  return "Ver WiFi";
+        case LCD_MENU_COUNTERS: return "Ver Contadores";
+        case LCD_MENU_SYSTEM:   return "Ver Sistema";
+        default:                return "Menu";
+    }
+}
+
+static void lcd_copy_window(char *dst, size_t dst_size, const char *src, uint32_t tick_ms)
+{
+    if (dst_size == 0) return;
+
+    const size_t width = LCD_VISIBLE_CHARS;
+    size_t len = strlen(src);
+    if (len <= width) {
+        snprintf(dst, dst_size, "%-*s", (int)width, src);
+        return;
+    }
+
+    char buffer[96];
+    snprintf(buffer, sizeof(buffer), "%s   %s", src, src);
+    size_t cycle = len + 3;
+    size_t offset = (tick_ms / LCD_SCROLL_STEP_MS) % cycle;
+
+    for (size_t i = 0; i < width; i++) {
+        dst[i] = buffer[offset + i];
+    }
+    dst[width] = '\0';
+}
+
+static void lcd_format_title(char *dst, size_t dst_size, const char *title)
+{
+    snprintf(dst, dst_size, "%-16.16s", title);
+}
+
+static void lcd_open_page(int page)
+{
+    ui_page = (page + LCD_PAGE_COUNT) % LCD_PAGE_COUNT;
+    ui_mode = UI_MODE_PAGES;
+}
+
+static void lcd_open_menu(void)
+{
+    ui_mode = UI_MODE_MENU;
+}
+
+static void lcd_toggle_menu(void)
+{
+    if (ui_mode == UI_MODE_MENU) ui_mode = UI_MODE_PAGES;
+    else ui_mode = UI_MODE_MENU;
+}
+
+static void lcd_menu_select_current(void)
+{
+    switch (ui_menu_index) {
+        case LCD_MENU_RESUME:
+            ui_mode = UI_MODE_PAGES;
+            break;
+        case LCD_MENU_HOME:
+            lcd_open_page(LCD_PAGE_HOME);
+            break;
+        case LCD_MENU_CLIMATE:
+            lcd_open_page(LCD_PAGE_CLIMATE);
+            break;
+        case LCD_MENU_POWER:
+            lcd_open_page(LCD_PAGE_POWER);
+            break;
+        case LCD_MENU_NETWORK:
+            lcd_open_page(LCD_PAGE_NETWORK);
+            break;
+        case LCD_MENU_COUNTERS:
+            lcd_open_page(LCD_PAGE_COUNTERS);
+            break;
+        case LCD_MENU_SYSTEM:
+            lcd_open_page(LCD_PAGE_SYSTEM);
+            break;
+        default:
+            ui_mode = UI_MODE_PAGES;
+            break;
+    }
+}
+
+static void lcd_handle_nav(const char *nav)
+{
+    if (strcmp(nav, "up") == 0) {
+        if (ui_mode == UI_MODE_MENU) ui_menu_index = (ui_menu_index + LCD_MENU_ITEMS - 1) % LCD_MENU_ITEMS;
+        else set_power_percent((int)potencia_percent + 5);
+    } else if (strcmp(nav, "down") == 0) {
+        if (ui_mode == UI_MODE_MENU) ui_menu_index = (ui_menu_index + 1) % LCD_MENU_ITEMS;
+        else set_power_percent((int)potencia_percent - 5);
+    } else if (strcmp(nav, "left") == 0) {
+        if (ui_mode == UI_MODE_MENU) ui_mode = UI_MODE_PAGES;
+        else ui_page = (ui_page + LCD_PAGE_COUNT - 1) % LCD_PAGE_COUNT;
+    } else if (strcmp(nav, "right") == 0) {
+        if (ui_mode == UI_MODE_MENU) lcd_menu_select_current();
+        else ui_page = (ui_page + 1) % LCD_PAGE_COUNT;
+    } else if (strcmp(nav, "ok") == 0) {
+        if (ui_mode == UI_MODE_MENU) lcd_menu_select_current();
+        else lcd_open_menu();
+    }
+}
+
+static void json_escape_copy(char *dst, size_t dst_size, const char *src)
+{
+    size_t j = 0;
+    if (dst_size == 0) return;
+
+    for (size_t i = 0; src[i] != '\0' && j + 1 < dst_size; i++) {
+        unsigned char c = (unsigned char)src[i];
+        if (c == '\\' || c == '"') {
+            if (j + 2 >= dst_size) break;
+            dst[j++] = '\\';
+            dst[j++] = (char)c;
+        } else if (c >= 32 && c <= 126) {
+            dst[j++] = (char)c;
+        } else {
+            dst[j++] = ' ';
+        }
+    }
+    dst[j] = '\0';
+}
+
+static void build_status_json(char *out, size_t out_size)
+{
+    char ssid_esc[80];
+    char ip_esc[24];
+    char page_esc[40];
+    char menu_esc[40];
+    char line0_esc[40];
+    char line1_esc[40];
+
+    json_escape_copy(ssid_esc, sizeof(ssid_esc), g_ssid);
+    json_escape_copy(ip_esc, sizeof(ip_esc), g_ip);
+    json_escape_copy(page_esc, sizeof(page_esc), lcd_page_label(ui_page));
+    json_escape_copy(menu_esc, sizeof(menu_esc), lcd_menu_label(ui_menu_index));
+    json_escape_copy(line0_esc, sizeof(line0_esc), g_lcd_line0);
+    json_escape_copy(line1_esc, sizeof(line1_esc), g_lcd_line1);
+
+    snprintf(out, out_size,
+        "{\"sensor_ok\":%s,\"temp\":%.1f,\"hum\":%.1f,\"power\":%d,"
+        "\"delay_us\":%d,\"pulse_us\":%d,\"semi_us\":%d,"
+        "\"zc\":%lu,\"fire\":%lu,\"mqtt\":%s,\"ap_mode\":%s,"
+        "\"ui_mode\":\"%s\",\"ui_page\":%d,\"ui_page_name\":\"%s\","
+        "\"menu_index\":%d,\"menu_label\":\"%s\",\"lcd_line0\":\"%s\",\"lcd_line1\":\"%s\","
+        "\"ssid\":\"%s\",\"ip\":\"%s\",\"retry\":%d,\"uptime_s\":%lu}",
+        sensor_ok ? "true" : "false",
+        last_temp, last_hum, (int)potencia_percent,
+        (int)retardo_us, TRIAC_PULSE_US, SEMICYCLE_US,
+        (unsigned long)zero_cross_count,
+        (unsigned long)triac_fire_count,
+        mqtt_connected ? "true" : "false",
+        in_ap_mode ? "true" : "false",
+        ui_mode == UI_MODE_MENU ? "menu" : "pages",
+        (int)ui_page, page_esc,
+        (int)ui_menu_index, menu_esc, line0_esc, line1_esc,
+        ssid_esc, ip_esc, retry_count,
+        (unsigned long)get_uptime_s());
 }
 
 // ================= INIT I2C =================
@@ -541,35 +772,26 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base, int32_t event_i
                 p += 5;
                 while (*p == ':' || *p == ' ' || *p == '"') p++;
                 int pw = atoi(p);
-                if (pw < 0)   pw = 0;
-                if (pw > 100) pw = 100;
-                potencia_percent = pw;
-                retardo_us = calcular_retardo_us(pw);
+                set_power_percent(pw);
                 ESP_LOGI(TAG, "Potencia via MQTT: %d%%", pw);
             }
             // Joystick nav: {"nav":"up/down/left/right/ok"}
             if (strstr(buf, "\"nav\"")) {
                 if (strstr(buf, ":\"up\"")) {
-                    int pw = (int)potencia_percent + 5;
-                    if (pw > 100) pw = 100;
-                    potencia_percent = pw;
-                    retardo_us = calcular_retardo_us(pw);
-                    ESP_LOGI(TAG, "Nav UP -> %d%%", pw);
+                    lcd_handle_nav("up");
+                    ESP_LOGI(TAG, "Nav UP");
                 } else if (strstr(buf, ":\"down\"")) {
-                    int pw = (int)potencia_percent - 5;
-                    if (pw < 0) pw = 0;
-                    potencia_percent = pw;
-                    retardo_us = calcular_retardo_us(pw);
-                    ESP_LOGI(TAG, "Nav DOWN -> %d%%", pw);
+                    lcd_handle_nav("down");
+                    ESP_LOGI(TAG, "Nav DOWN");
                 } else if (strstr(buf, ":\"right\"")) {
-                    lcd_screen = (lcd_screen + 1) % LCD_NUM_SCREENS;
-                    ESP_LOGI(TAG, "Nav RIGHT -> pantalla %d", lcd_screen);
+                    lcd_handle_nav("right");
+                    ESP_LOGI(TAG, "Nav RIGHT");
                 } else if (strstr(buf, ":\"left\"")) {
-                    lcd_screen = (lcd_screen + LCD_NUM_SCREENS - 1) % LCD_NUM_SCREENS;
-                    ESP_LOGI(TAG, "Nav LEFT -> pantalla %d", lcd_screen);
+                    lcd_handle_nav("left");
+                    ESP_LOGI(TAG, "Nav LEFT");
                 } else if (strstr(buf, ":\"ok\"")) {
-                    lcd_screen = 0;
-                    ESP_LOGI(TAG, "Nav OK -> pantalla 0");
+                    lcd_handle_nav("ok");
+                    ESP_LOGI(TAG, "Nav OK");
                 }
             }
             break;
@@ -602,18 +824,10 @@ static void mqtt_init(void)
 // ================= TAREA MQTT PUBLISH =================
 static void mqtt_publish_task(void *pvParameters)
 {
-    char payload[256];
+    char payload[640];
     while (1) {
         if (mqtt_connected) {
-            snprintf(payload, sizeof(payload),
-                "{\"sensor_ok\":%s,\"temp\":%.1f,\"hum\":%.1f,\"power\":%d,"
-                "\"delay_us\":%d,\"pulse_us\":%d,\"semi_us\":%d,"
-                "\"zc\":%lu,\"fire\":%lu}",
-                sensor_ok ? "true" : "false",
-                last_temp, last_hum, (int)potencia_percent,
-                (int)retardo_us, TRIAC_PULSE_US, SEMICYCLE_US,
-                (unsigned long)zero_cross_count,
-                (unsigned long)triac_fire_count);
+            build_status_json(payload, sizeof(payload));
             esp_mqtt_client_publish(mqtt_client, TOPIC_DATA, payload, 0, 1, 0);
         }
         vTaskDelay(pdMS_TO_TICKS(2000));
@@ -880,16 +1094,9 @@ static esp_err_t root_get_handler(httpd_req_t *req)
 // ================= WEB DATA =================
 static esp_err_t data_get_handler(httpd_req_t *req)
 {
-    char response[256];
+    char response[640];
     httpd_resp_set_type(req, "application/json");
-    snprintf(response, sizeof(response),
-        "{\"sensor_ok\":%s,\"temp\":%.1f,\"hum\":%.1f,\"power\":%d,"
-        "\"delay_us\":%d,\"pulse_us\":%d,\"semi_us\":%d,\"zc\":%lu,\"fire\":%lu}",
-        sensor_ok ? "true" : "false",
-        last_temp, last_hum, (int)potencia_percent,
-        (int)retardo_us, TRIAC_PULSE_US, SEMICYCLE_US,
-        (unsigned long)zero_cross_count,
-        (unsigned long)triac_fire_count);
+    build_status_json(response, sizeof(response));
     return httpd_resp_send(req, response, HTTPD_RESP_USE_STRLEN);
 }
 
@@ -900,10 +1107,7 @@ static esp_err_t set_get_handler(httpd_req_t *req)
     if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
         if (httpd_query_key_value(query, "power", value, sizeof(value)) == ESP_OK) {
             int p = atoi(value);
-            if (p < 0)   p = 0;
-            if (p > 100) p = 100;
-            potencia_percent = p;
-            retardo_us = calcular_retardo_us(p);
+            set_power_percent(p);
         }
     }
     httpd_resp_set_type(req, "application/json");
@@ -913,10 +1117,11 @@ static esp_err_t set_get_handler(httpd_req_t *req)
 // ================= WEB SCREEN =================
 static esp_err_t screen_get_handler(httpd_req_t *req)
 {
-    lcd_screen = (lcd_screen + 1) % LCD_NUM_SCREENS;
+    ui_page = (ui_page + 1) % LCD_PAGE_COUNT;
+    ui_mode = UI_MODE_PAGES;
     httpd_resp_set_type(req, "application/json");
-    char resp[32];
-    snprintf(resp, sizeof(resp), "{\"screen\":%d}", (int)lcd_screen);
+    char resp[80];
+    snprintf(resp, sizeof(resp), "{\"screen\":%d,\"page\":\"%s\"}", (int)ui_page, lcd_page_label(ui_page));
     return httpd_resp_send(req, resp, HTTPD_RESP_USE_STRLEN);
 }
 
@@ -963,56 +1168,118 @@ static httpd_handle_t start_webserver(bool ap_mode_active)
 // ================= TAREA LCD =================
 static void lcd_update_task(void *pvParameters)
 {
-    uint8_t line0[17], line1[17];
+    char line0[LCD_VISIBLE_CHARS + 1];
+    char line1[LCD_VISIBLE_CHARS + 1];
     bool btn_prev = true;
+    bool long_press_handled = false;
+    TickType_t btn_down_tick = 0;
 
     while (1) {
         bool btn_now = gpio_get_level(BUTTON_PIN);
-        if (!btn_now && btn_prev)
-            lcd_screen = (lcd_screen + 1) % LCD_NUM_SCREENS;
+        TickType_t now_ticks = xTaskGetTickCount();
+        uint32_t tick_ms = (uint32_t)(now_ticks * portTICK_PERIOD_MS);
+
+        if (!btn_now && btn_prev) {
+            btn_down_tick = now_ticks;
+            long_press_handled = false;
+        }
+
+        if (!btn_now && !long_press_handled &&
+            (now_ticks - btn_down_tick) * portTICK_PERIOD_MS >= BUTTON_LONG_PRESS_MS) {
+            lcd_toggle_menu();
+            long_press_handled = true;
+        }
+
+        if (btn_now && !btn_prev && !long_press_handled) {
+            if (ui_mode == UI_MODE_MENU) ui_menu_index = (ui_menu_index + 1) % LCD_MENU_ITEMS;
+            else ui_page = (ui_page + 1) % LCD_PAGE_COUNT;
+        }
         btn_prev = btn_now;
 
         if (in_ap_mode) {
-            snprintf((char*)line0, 17, "%-16s", "  Modo Config   ");
-            snprintf((char*)line1, 17, "%-16s", " 192.168.4.1   ");
+            lcd_format_title(line0, sizeof(line0), "Modo Config");
+            lcd_copy_window(line1, sizeof(line1), "AP Horno-Config 192.168.4.1", tick_ms);
+        } else if (ui_mode == UI_MODE_MENU) {
+            char menu_line[32];
+            snprintf(menu_line, sizeof(menu_line), "> %s", lcd_menu_label(ui_menu_index));
+            lcd_format_title(line0, sizeof(line0), "Menu remoto");
+            lcd_copy_window(line1, sizeof(line1), menu_line, tick_ms);
         } else {
-            switch (lcd_screen) {
-
-                case 0: { // Temperatura + humedad | Barra de potencia
+            switch (ui_page) {
+                case LCD_PAGE_HOME: {
                     if (sensor_ok) {
-                        snprintf((char*)line0, 17, "\x03%5.1f" "\xDF" "C \x04%5.1f%%",
+                        snprintf(line0, sizeof(line0), "\x03%5.1f" "\xDF" "C \x04%5.1f%%",
                                  last_temp, last_hum);
                     } else {
-                        snprintf((char*)line0, 17, "\x03 Sin sensor    ");
+                        lcd_format_title(line0, sizeof(line0), "\x03 Sin sensor");
                     }
-                    // Barra: 10 bloques llenos/vacios + espacio + porcentaje
-                    int pct    = (int)potencia_percent;
+                    int pct = (int)potencia_percent;
                     int filled = (pct * 10 + 50) / 100;
-                    for (int i = 0; i < 10; i++)
-                        line1[i] = (uint8_t)(i < filled ? 0x01 : 0x02);
+                    for (int i = 0; i < 10; i++) line1[i] = (char)(i < filled ? 0x01 : 0x02);
                     line1[10] = ' ';
-                    snprintf((char*)line1 + 11, 5, "%3d%%", pct);
-                    // pos 15 = '\0' → lcd_print_line rellena con espacio
+                    snprintf(line1 + 11, sizeof(line1) - 11, "%3d%%", pct);
                     break;
                 }
-
-                case 1: { // Red WiFi + IP
-                    snprintf((char*)line0, 17, "\x05 %-14.14s", g_ssid);
-                    snprintf((char*)line1, 17, "%-16.15s",      g_ip);
+                case LCD_PAGE_CLIMATE: {
+                    lcd_format_title(line0, sizeof(line0), "Clima ambiente");
+                    if (sensor_ok) {
+                        char climate[48];
+                        snprintf(climate, sizeof(climate), "Temp %.1fC  Hum %.1f%%",
+                                 last_temp, last_hum);
+                        lcd_copy_window(line1, sizeof(line1), climate, tick_ms);
+                    } else {
+                        lcd_copy_window(line1, sizeof(line1), "Sensor AM2320 no detectado", tick_ms);
+                    }
                     break;
                 }
-
-                case 2: { // Contadores tecnicos
-                    snprintf((char*)line0, 17, "\x06 ZC:%-10lu ",
+                case LCD_PAGE_POWER: {
+                    lcd_format_title(line0, sizeof(line0), "Potencia TRIAC");
+                    char power_line[48];
+                    snprintf(power_line, sizeof(power_line), "%d%% Delay %dus Pulse %dus",
+                             (int)potencia_percent, (int)retardo_us, TRIAC_PULSE_US);
+                    lcd_copy_window(line1, sizeof(line1), power_line, tick_ms);
+                    break;
+                }
+                case LCD_PAGE_NETWORK: {
+                    snprintf(line0, sizeof(line0), "\x05 %-14.14s", g_ssid);
+                    char net_line[64];
+                    snprintf(net_line, sizeof(net_line), "%s | MQTT %s",
+                             g_ip, mqtt_connected ? "online" : "retry");
+                    lcd_copy_window(line1, sizeof(line1), net_line, tick_ms);
+                    break;
+                }
+                case LCD_PAGE_TIMING: {
+                    lcd_format_title(line0, sizeof(line0), "Fase AC 50Hz");
+                    char timing_line[64];
+                    snprintf(timing_line, sizeof(timing_line), "Semi %dus Gate %dus Retry %d",
+                             SEMICYCLE_US, TRIAC_PULSE_US, retry_count);
+                    lcd_copy_window(line1, sizeof(line1), timing_line, tick_ms);
+                    break;
+                }
+                case LCD_PAGE_COUNTERS: {
+                    snprintf(line0, sizeof(line0), "\x06 ZC:%-10lu",
                              (unsigned long)zero_cross_count);
-                    snprintf((char*)line1, 17, "\x06 FR:%-10lu ",
+                    snprintf(line1, sizeof(line1), "\x06 FR:%-10lu",
                              (unsigned long)triac_fire_count);
+                    break;
+                }
+                case LCD_PAGE_SYSTEM:
+                default: {
+                    lcd_format_title(line0, sizeof(line0), "Sistema");
+                    char sys_line[64];
+                    snprintf(sys_line, sizeof(sys_line), "%s | up %lus",
+                             in_ap_mode ? "AP config" : "STA normal",
+                             (unsigned long)get_uptime_s());
+                    lcd_copy_window(line1, sizeof(line1), sys_line, tick_ms);
                     break;
                 }
             }
         }
-        lcd_print_line(0, (char*)line0);
-        lcd_print_line(1, (char*)line1);
+
+        memcpy(g_lcd_line0, line0, sizeof(g_lcd_line0));
+        memcpy(g_lcd_line1, line1, sizeof(g_lcd_line1));
+        lcd_print_line(0, line0);
+        lcd_print_line(1, line1);
         vTaskDelay(pdMS_TO_TICKS(300));
     }
 }
