@@ -950,8 +950,8 @@ static void lcd_update_task(void *pvParameters)
                     break;
 
                 case 2: // TRIAC tecnico
-                    snprintf(line0, sizeof(line0), "ZC:%13lu", (unsigned long)zero_cross_count);
-                    snprintf(line1, sizeof(line1), "Ret:%8d us  ", (int)retardo_us);
+                    snprintf(line0, sizeof(line0), "ZC:%-13lu", (unsigned long)zero_cross_count);
+                    snprintf(line1, sizeof(line1), "Fire:%-11lu", (unsigned long)triac_fire_count);
                     break;
             }
         }
