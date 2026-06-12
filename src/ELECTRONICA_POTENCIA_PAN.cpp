@@ -527,6 +527,10 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base, int32_t event_i
                 retardo_us = calcular_retardo_us(pw);
                 ESP_LOGI(TAG, "Potencia via MQTT: %d%%", pw);
             }
+            if (strstr(buf, "screen")) {
+                lcd_screen = (lcd_screen + 1) % LCD_NUM_SCREENS;
+                ESP_LOGI(TAG, "Pantalla LCD via MQTT: %d", lcd_screen);
+            }
             break;
         }
 
