@@ -50,10 +50,19 @@
 #define I2C_SCL             GPIO_NUM_22
 #define ZERO_CROSS_PIN      GPIO_NUM_27
 #define TRIAC_PIN           GPIO_NUM_18
+#define BUTTON_PIN          GPIO_NUM_0   // boton BOOT del DevKit (activo en LOW)
 
 // ================= AM2320 =================
 #define I2C_FREQ_HZ         100000
 #define AM2320_ADDR         0x5C
+
+// ================= LCD 16x2 I2C =================
+#define LCD_ADDR        0x27   // cambiar a 0x3F si no responde
+#define LCD_NUM_SCREENS 3
+// Bits PCF8574 → HD44780: P7=D7 P6=D6 P5=D5 P4=D4 P3=BL P2=EN P1=RW P0=RS
+#define LCD_BL   0x08
+#define LCD_EN   0x04
+#define LCD_RS   0x01
 
 // ================= CONTROL TRIAC =================
 #define SEMICYCLE_US        10000
@@ -77,6 +86,7 @@ static char g_pass[65] = {0};
 // I2C
 static i2c_master_bus_handle_t i2c_bus_handle;
 static i2c_master_dev_handle_t am2320_handle;
+static i2c_master_dev_handle_t lcd_dev;
 
 // TRIAC
 static QueueHandle_t zero_cross_queue;
@@ -95,6 +105,10 @@ static volatile uint32_t triac_fire_count = 0;
 static float last_temp = 0.0f;
 static float last_hum  = 0.0f;
 static bool  sensor_ok = false;
+
+// LCD pantallas
+static volatile int lcd_screen = 0;
+static char g_ip[16] = "---";
 
 // ================= NVS WIFI =================
 static bool nvs_load_wifi(char *ssid, char *pass)
@@ -224,9 +238,96 @@ static esp_err_t am2320_read(float *temperature, float *humidity)
     return ESP_OK;
 }
 
+// ================= LCD DRIVER =================
+static void lcd_write_byte(uint8_t data) {
+    i2c_master_transmit(lcd_dev, &data, 1, 100); // 100 ms — xfer_timeout_ms espera ms, no ticks
+}
+
+static void lcd_pulse_en(uint8_t data) {
+    lcd_write_byte(data | LCD_EN);
+    esp_rom_delay_us(500);
+    lcd_write_byte(data & ~LCD_EN);
+    esp_rom_delay_us(500);
+}
+
+static void lcd_send_nibble(uint8_t nibble, uint8_t rs) {
+    lcd_pulse_en((nibble << 4) | LCD_BL | rs);
+}
+
+static void lcd_send_byte(uint8_t byte, uint8_t rs) {
+    lcd_send_nibble(byte >> 4, rs);
+    lcd_send_nibble(byte & 0x0F, rs);
+}
+
+static void lcd_cmd(uint8_t cmd)         { lcd_send_byte(cmd,  0);      }
+static void lcd_char(uint8_t c)          { lcd_send_byte(c,    LCD_RS); }
+
+static void lcd_init(void) {
+    vTaskDelay(pdMS_TO_TICKS(50));
+    lcd_send_nibble(0x03, 0); esp_rom_delay_us(5000);
+    lcd_send_nibble(0x03, 0); esp_rom_delay_us(200);
+    lcd_send_nibble(0x03, 0); esp_rom_delay_us(200);
+    lcd_send_nibble(0x02, 0); esp_rom_delay_us(200);
+    lcd_cmd(0x28);             // 4-bit, 2 lineas, 5x8
+    lcd_cmd(0x08);             // display off
+    lcd_cmd(0x01);             // clear
+    esp_rom_delay_us(2000);
+    lcd_cmd(0x06);             // incrementar cursor
+    lcd_cmd(0x0C);             // display on, cursor off
+    ESP_LOGI(TAG, "LCD 1602 iniciado (0x%02X)", LCD_ADDR);
+}
+
+static void lcd_set_cursor(uint8_t col, uint8_t row) {
+    lcd_cmd(0x80 | (col + (row ? 0x40 : 0x00)));
+}
+
+// Escribe exactamente 16 chars (rellena con espacios si es mas corto)
+static void lcd_print_line(uint8_t row, const char *str) {
+    lcd_set_cursor(0, row);
+    for (int i = 0; i < 16; i++) {
+        lcd_char(str[i] ? (uint8_t)str[i] : ' ');
+    }
+}
+
 // ================= INIT I2C =================
 static void i2c_init_am2320(void)
 {
+    // --- Diagnostico GPIO antes de tocar el driver ---
+    gpio_set_direction(I2C_SDA, GPIO_MODE_INPUT);
+    gpio_set_direction(I2C_SCL, GPIO_MODE_INPUT);
+    int sda_lvl = gpio_get_level(I2C_SDA);
+    int scl_lvl = gpio_get_level(I2C_SCL);
+    ESP_LOGI(TAG, "Estado fisico I2C antes de init: SDA=%d SCL=%d  %s",
+             sda_lvl, scl_lvl, (sda_lvl && scl_lvl) ? "(bus libre)" : "<<< BUS BLOQUEADO >>>");
+
+    if (!sda_lvl || !scl_lvl) {
+        ESP_LOGW(TAG, "Liberando bus por bit-bang (9 pulsos SCL)...");
+        gpio_config_t rc = {};
+        rc.pin_bit_mask  = (1ULL << I2C_SDA) | (1ULL << I2C_SCL);
+        rc.mode          = GPIO_MODE_OUTPUT_OD;
+        rc.pull_up_en    = GPIO_PULLUP_ENABLE;
+        rc.pull_down_en  = GPIO_PULLDOWN_DISABLE;
+        rc.intr_type     = GPIO_INTR_DISABLE;
+        gpio_config(&rc);
+
+        gpio_set_level(I2C_SDA, 1);
+        gpio_set_level(I2C_SCL, 1);
+        esp_rom_delay_us(20);
+        for (int i = 0; i < 9; i++) {
+            gpio_set_level(I2C_SCL, 0); esp_rom_delay_us(20);
+            gpio_set_level(I2C_SCL, 1); esp_rom_delay_us(20);
+        }
+        // Condicion STOP: SDA sube con SCL en alto
+        gpio_set_level(I2C_SDA, 0); esp_rom_delay_us(20);
+        gpio_set_level(I2C_SCL, 1); esp_rom_delay_us(20);
+        gpio_set_level(I2C_SDA, 1); esp_rom_delay_us(20);
+
+        gpio_set_direction(I2C_SDA, GPIO_MODE_INPUT);
+        gpio_set_direction(I2C_SCL, GPIO_MODE_INPUT);
+        ESP_LOGI(TAG, "Post bit-bang: SDA=%d SCL=%d",
+                 gpio_get_level(I2C_SDA), gpio_get_level(I2C_SCL));
+    }
+
     i2c_master_bus_config_t bus_config = {};
     bus_config.i2c_port          = I2C_NUM_0;
     bus_config.sda_io_num        = I2C_SDA;
@@ -236,12 +337,23 @@ static void i2c_init_am2320(void)
     bus_config.flags.enable_internal_pullup = true;
     ESP_ERROR_CHECK(i2c_new_master_bus(&bus_config, &i2c_bus_handle));
 
+    esp_err_t rec = i2c_master_bus_reset(i2c_bus_handle);
+    ESP_LOGI(TAG, "Driver bus reset: %s", rec == ESP_OK ? "OK" : esp_err_to_name(rec));
+    vTaskDelay(pdMS_TO_TICKS(10));
+
     i2c_device_config_t dev_config = {};
     dev_config.dev_addr_length = I2C_ADDR_BIT_LEN_7;
     dev_config.device_address  = AM2320_ADDR;
     dev_config.scl_speed_hz    = I2C_FREQ_HZ;
     ESP_ERROR_CHECK(i2c_master_bus_add_device(i2c_bus_handle, &dev_config, &am2320_handle));
-    ESP_LOGI(TAG, "I2C listo: SDA GPIO21, SCL GPIO22");
+
+    i2c_device_config_t lcd_config = {};
+    lcd_config.dev_addr_length = I2C_ADDR_BIT_LEN_7;
+    lcd_config.device_address  = LCD_ADDR;
+    lcd_config.scl_speed_hz    = I2C_FREQ_HZ;
+    ESP_ERROR_CHECK(i2c_master_bus_add_device(i2c_bus_handle, &lcd_config, &lcd_dev));
+
+    ESP_LOGI(TAG, "I2C listo: SDA GPIO21, SCL GPIO22 (AM2320=0x5C, LCD=0x%02X)", LCD_ADDR);
 }
 
 // ================= TAREA SENSOR =================
@@ -480,7 +592,8 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t e
     }
     else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t *ev = (ip_event_got_ip_t *)event_data;
-        ESP_LOGI(TAG, "WiFi OK. IP: " IPSTR, IP2STR(&ev->ip_info.ip));
+        snprintf(g_ip, sizeof(g_ip), IPSTR, IP2STR(&ev->ip_info.ip));
+        ESP_LOGI(TAG, "WiFi OK. IP: %s", g_ip);
         retry_count = 0;
         xEventGroupSetBits(wifi_event_group, WIFI_CONNECTED_BIT);
     }
@@ -652,6 +765,7 @@ static esp_err_t root_get_handler(httpd_req_t *req)
         ".btn{padding:10px 4px;border-radius:9px;border:1px solid #334155;background:#0f172a;color:#94a3b8;font-size:13px;font-weight:600;cursor:pointer;}"
         ".emg{width:100%;padding:15px;border-radius:12px;border:none;background:linear-gradient(135deg,#dc2626,#991b1b);color:white;font-size:17px;font-weight:800;cursor:pointer;letter-spacing:0.5px;}"
         ".wifi-btn{width:100%;padding:11px;border-radius:10px;border:1px solid #334155;background:#0f172a;color:#60a5fa;font-size:14px;font-weight:600;cursor:pointer;margin-top:10px;}"
+        ".lcd-btn{width:100%;padding:11px;border-radius:10px;border:1px solid #334155;background:#0f172a;color:#a78bfa;font-size:14px;font-weight:600;cursor:pointer;margin-top:8px;}"
         ".badge{display:inline-flex;align-items:center;gap:7px;font-size:13px;font-weight:600;padding:6px 16px;border-radius:20px;margin-bottom:14px;}"
         ".b-ok{background:#052e16;color:#22c55e;border:1px solid #15803d;}"
         ".b-err{background:#2d0d0d;color:#f87171;border:1px solid #991b1b;}"
@@ -679,6 +793,7 @@ static esp_err_t root_get_handler(httpd_req_t *req)
         "<button class='btn' style='border-color:#064e3b;color:#6ee7b7;' onclick='set(100)'>MAX</button>"
         "</div>"
         "<button class='emg' onclick='set(0)'>&#9632; PARADA DE EMERGENCIA</button>"
+        "<button class='lcd-btn' onclick='fetch(\"/screen\")'>&#8644; Cambiar pantalla LCD</button>"
         "<button class='wifi-btn' onclick='location.href=\"/wifi\"'>&#9881; Cambiar red WiFi</button>"
         "<div id='dbg' class='dbg'>Esperando datos...</div>"
         "</div></div>"
@@ -750,6 +865,16 @@ static esp_err_t set_get_handler(httpd_req_t *req)
     return httpd_resp_send(req, "{\"ok\":true}", HTTPD_RESP_USE_STRLEN);
 }
 
+// ================= WEB SCREEN =================
+static esp_err_t screen_get_handler(httpd_req_t *req)
+{
+    lcd_screen = (lcd_screen + 1) % LCD_NUM_SCREENS;
+    httpd_resp_set_type(req, "application/json");
+    char resp[32];
+    snprintf(resp, sizeof(resp), "{\"screen\":%d}", (int)lcd_screen);
+    return httpd_resp_send(req, resp, HTTPD_RESP_USE_STRLEN);
+}
+
 // ================= WEB SERVER =================
 static httpd_handle_t start_webserver(bool ap_mode_active)
 {
@@ -757,7 +882,7 @@ static httpd_handle_t start_webserver(bool ap_mode_active)
     config.server_port      = 80;
     config.stack_size       = 8192;
     config.lru_purge_enable = true;
-    config.max_uri_handlers = 8;
+    config.max_uri_handlers = 9;
 
     httpd_handle_t server = NULL;
     if (httpd_start(&server, &config) != ESP_OK) {
@@ -776,17 +901,64 @@ static httpd_handle_t start_webserver(bool ap_mode_active)
     } else {
         // Modo normal + endpoint para cambiar WiFi
         httpd_uri_t uris[] = {
-            { .uri = "/",     .method = HTTP_GET, .handler = root_get_handler,    .user_ctx = NULL },
-            { .uri = "/data", .method = HTTP_GET, .handler = data_get_handler,    .user_ctx = NULL },
-            { .uri = "/set",  .method = HTTP_GET, .handler = set_get_handler,     .user_ctx = NULL },
-            { .uri = "/wifi", .method = HTTP_GET, .handler = config_root_handler, .user_ctx = NULL },
-            { .uri = "/save", .method = HTTP_GET, .handler = config_save_handler, .user_ctx = NULL },
+            { .uri = "/",       .method = HTTP_GET, .handler = root_get_handler,    .user_ctx = NULL },
+            { .uri = "/data",   .method = HTTP_GET, .handler = data_get_handler,    .user_ctx = NULL },
+            { .uri = "/set",    .method = HTTP_GET, .handler = set_get_handler,     .user_ctx = NULL },
+            { .uri = "/wifi",   .method = HTTP_GET, .handler = config_root_handler, .user_ctx = NULL },
+            { .uri = "/save",   .method = HTTP_GET, .handler = config_save_handler, .user_ctx = NULL },
+            { .uri = "/screen", .method = HTTP_GET, .handler = screen_get_handler,  .user_ctx = NULL },
         };
-        for (int i = 0; i < 5; i++) httpd_register_uri_handler(server, &uris[i]);
+        for (int i = 0; i < 6; i++) httpd_register_uri_handler(server, &uris[i]);
         ESP_LOGI(TAG, "Servidor web listo en puerto 80");
     }
 
     return server;
+}
+
+// ================= TAREA LCD =================
+static void lcd_update_task(void *pvParameters)
+{
+    char line0[17], line1[17];
+    bool btn_prev = true; // GPIO0 idle = HIGH (pull-up)
+
+    while (1) {
+        // Detectar flanco descendente del boton (presion)
+        bool btn_now = gpio_get_level(BUTTON_PIN);
+        if (!btn_now && btn_prev) {
+            lcd_screen = (lcd_screen + 1) % LCD_NUM_SCREENS;
+        }
+        btn_prev = btn_now;
+
+        if (in_ap_mode) {
+            snprintf(line0, sizeof(line0), "%-16s", "Modo Config");
+            snprintf(line1, sizeof(line1), "%-16s", "192.168.4.1");
+        } else {
+            switch (lcd_screen) {
+
+                case 0: // Sensor + potencia
+                    if (sensor_ok) {
+                        snprintf(line0, sizeof(line0), "T:%5.1fC H:%4.1f%%", last_temp, last_hum);
+                    } else {
+                        snprintf(line0, sizeof(line0), "%-16s", "Sin sensor");
+                    }
+                    snprintf(line1, sizeof(line1), "Potencia: %3d%%  ", (int)potencia_percent);
+                    break;
+
+                case 1: // Red
+                    snprintf(line0, sizeof(line0), "%-16.16s", g_ssid);
+                    snprintf(line1, sizeof(line1), "%-16s", g_ip);
+                    break;
+
+                case 2: // TRIAC tecnico
+                    snprintf(line0, sizeof(line0), "ZC: %12lu", (unsigned long)zero_cross_count);
+                    snprintf(line1, sizeof(line1), "Ret:%9d us ", (int)retardo_us);
+                    break;
+            }
+        }
+        lcd_print_line(0, line0);
+        lcd_print_line(1, line1);
+        vTaskDelay(pdMS_TO_TICKS(300));
+    }
 }
 
 // ================= APP MAIN =================
@@ -799,7 +971,24 @@ extern "C" void app_main(void)
     }
     ESP_ERROR_CHECK(ret);
 
+    gpio_config_t btn_conf = {};
+    btn_conf.pin_bit_mask = (1ULL << BUTTON_PIN);
+    btn_conf.mode         = GPIO_MODE_INPUT;
+    btn_conf.pull_up_en   = GPIO_PULLUP_ENABLE;
+    btn_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
+    btn_conf.intr_type    = GPIO_INTR_DISABLE;
+    gpio_config(&btn_conf);
+
     i2c_init_am2320();
+
+    // Reset del bus antes de inicializar el LCD
+    i2c_master_bus_reset(i2c_bus_handle);
+    vTaskDelay(pdMS_TO_TICKS(20));
+
+    lcd_init();
+    lcd_print_line(0, " HORNO DE PAN  ");
+    lcd_print_line(1, "  Iniciando... ");
+
     triac_control_init();
 
     // Cargar credenciales WiFi desde NVS o usar las de fabrica
@@ -813,6 +1002,8 @@ extern "C" void app_main(void)
 
     wifi_stack_init();
 
+    lcd_print_line(0, "Conectando WiFi ");
+    lcd_print_line(1, g_ssid);
     bool connected = wifi_connect_with(g_ssid, g_pass, false);
 
     if (!connected) {
@@ -833,6 +1024,8 @@ extern "C" void app_main(void)
     if (connected) {
         nvs_save_wifi_backup(g_ssid, g_pass);
         in_ap_mode = false;
+        lcd_print_line(0, "WiFi Conectado! ");
+        lcd_print_line(1, g_ssid);
         mqtt_init();
         xTaskCreate(sensor_task,       "sensor_task",  4096, NULL, 5, NULL);
         xTaskCreate(mqtt_publish_task, "mqtt_publish", 4096, NULL, 5, NULL);
@@ -840,8 +1033,12 @@ extern "C" void app_main(void)
         ESP_LOGI(TAG, "Sistema listo. Control remoto via MQTT, local via HTTP.");
     } else {
         in_ap_mode = true;
+        lcd_print_line(0, " Modo Config    ");
+        lcd_print_line(1, "192.168.4.1     ");
         wifi_start_ap();
         start_webserver(true);
         ESP_LOGW(TAG, "MODO CONFIG: conectate a '%s' y entra a http://192.168.4.1", AP_SSID_NAME);
     }
+
+    xTaskCreate(lcd_update_task, "lcd_update", 4096, NULL, 4, NULL);
 }
