@@ -51,8 +51,16 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:24px;heigh
 .emg:hover{box-shadow:0 4px 28px #ef444470;transform:translateY(-1px);}
 .emg.stopped{background:linear-gradient(135deg,#374151,#1f2937);color:#6b7280;box-shadow:none;}
 .dbg{font-size:11px;color:#475569;font-family:monospace;background:#0f172a;padding:8px 12px;border-radius:8px;margin-bottom:14px;border:1px solid #1e293b;}
-.lcd-btn{width:100%;padding:11px;border-radius:10px;border:1px solid #334155;background:#0f172a;color:#a78bfa;font-size:14px;font-weight:600;cursor:pointer;margin-top:8px;transition:all .15s;}
-.lcd-btn:hover{background:#7c3aed;border-color:#7c3aed;color:#fff;}
+.dpad-wrap{display:flex;flex-direction:column;align-items:center;margin:14px 0 4px;}
+.dpad-lbl{font-size:10px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:#475569;margin-bottom:10px;}
+.dpad{display:grid;grid-template-columns:repeat(3,56px);grid-template-rows:repeat(3,56px);gap:6px;}
+.dp{background:#0f172a;border:1.5px solid #334155;border-radius:10px;color:#94a3b8;font-size:22px;line-height:1;display:flex;align-items:center;justify-content:center;cursor:pointer;user-select:none;-webkit-user-select:none;transition:background .1s,transform .1s,border-color .1s;padding:0;outline:none;}
+.dp:hover{border-color:#4f46e5;color:#c4b5fd;}
+.dp:active{background:#4f46e5;border-color:#818cf8;color:#fff;transform:scale(.86);}
+.dp-ok{border-radius:50%;font-size:18px;color:#475569;border-color:#334155;}
+.dp-ok:hover{border-color:#15803d;color:#4ade80;}
+.dp-ok:active{background:#15803d;border-color:#22c55e;color:#fff;transform:scale(.86);}
+.dpad-hint{font-size:10px;color:#334155;text-align:center;margin-top:10px;line-height:1.9;}
 .chart-lbl{font-size:10px;font-weight:600;letter-spacing:1.5px;text-transform:uppercase;color:#64748b;margin-bottom:8px;}
 canvas{border-radius:10px;width:100%;display:block;}
 .footer{text-align:center;font-size:11px;color:#334155;padding:6px 0 10px;}
@@ -87,7 +95,21 @@ canvas{border-radius:10px;width:100%;display:block;}
     <button class='btn btn-max' onclick='setPower(100)'>MAX</button>
   </div>
   <button id='emergBtn' class='emg' onclick='emergencyStop()'>&#9632; PARADA DE EMERGENCIA</button>
-  <button id='lcdBtn' class='lcd-btn' onclick='nextScreen()'>&#8644; Cambiar pantalla LCD</button>
+  <div class='dpad-wrap'>
+    <div class='dpad-lbl'>Control LCD</div>
+    <div class='dpad'>
+      <div></div>
+      <button class='dp' id='dp-u' onmousedown='navHold("up")' onmouseup='navStop()' onmouseleave='navStop()' ontouchstart='navHold("up");event.preventDefault()' ontouchend='navStop()'>&#9650;</button>
+      <div></div>
+      <button class='dp' id='dp-l' onmousedown='navHold("left")' onmouseup='navStop()' onmouseleave='navStop()' ontouchstart='navHold("left");event.preventDefault()' ontouchend='navStop()'>&#9664;</button>
+      <button class='dp dp-ok' id='dp-ok' onclick='navCmd("ok")'>&#9679;</button>
+      <button class='dp' id='dp-r' onmousedown='navHold("right")' onmouseup='navStop()' onmouseleave='navStop()' ontouchstart='navHold("right");event.preventDefault()' ontouchend='navStop()'>&#9654;</button>
+      <div></div>
+      <button class='dp' id='dp-d' onmousedown='navHold("down")' onmouseup='navStop()' onmouseleave='navStop()' ontouchstart='navHold("down");event.preventDefault()' ontouchend='navStop()'>&#9660;</button>
+      <div></div>
+    </div>
+    <div class='dpad-hint'>&#9664; &#9654; cambiar pantalla &nbsp;&bull;&nbsp; &#9650; &#9660; potencia &plusmn;5% &nbsp;&bull;&nbsp; &#9679; inicio</div>
+  </div>
   <div id='debug' class='dbg'>Esperando datos del horno...</div>
   <div class='chart-lbl'>Senal de disparo TRIAC &mdash; 50 Hz</div>
   <canvas id='wave' width='460' height='200'></canvas>
@@ -122,18 +144,23 @@ function initMQTT(){
   });
 }
 function pub(v){if(mqttClient&&mqttClient.connected)mqttClient.publish('horno/control',JSON.stringify({power:v}),{qos:1});}
-function nextScreen(){
-  var b=document.getElementById('lcdBtn');
-  if(mqttClient&&mqttClient.connected){
-    mqttClient.publish('horno/control',JSON.stringify({screen:'next'}),{qos:1},function(err){
-      if(err){b.textContent='Error: '+err.message;setTimeout(function(){b.innerHTML='&#8644; Cambiar pantalla LCD';},2000);}
-      else{b.textContent='Enviado ✓';setTimeout(function(){b.innerHTML='&#8644; Cambiar pantalla LCD';},1000);}
-    });
-  }else{
-    b.textContent='Sin conexion MQTT';
-    setTimeout(function(){b.innerHTML='&#8644; Cambiar pantalla LCD';},2000);
+var navTimer=null;
+function navCmd(dir){
+  if(!mqttClient||!mqttClient.connected) return;
+  if(emergency&&(dir==='up'||dir==='down')) return;
+  mqttClient.publish('horno/control',JSON.stringify({nav:dir}),{qos:0});
+  if((dir==='up'||dir==='down')&&!emergency){
+    var cur=parseInt(document.getElementById('slider').value)||0;
+    var nv=dir==='up'?Math.min(100,cur+5):Math.max(0,cur-5);
+    document.getElementById('slider').value=nv;
+    document.getElementById('pot').innerHTML=nv+' %';
+    lastData.power=nv;
+    lastData.delay_us=Math.max(200,((100-nv)*10000/100));
+    drawWave();
   }
 }
+function navHold(dir){navCmd(dir);navTimer=setInterval(function(){navCmd(dir);},250);}
+function navStop(){clearInterval(navTimer);navTimer=null;}
 function setPower(v){if(emergency)return;v=parseInt(v);document.getElementById('slider').value=v;document.getElementById('pot').innerHTML=v+' %';lastData.power=v;lastData.delay_us=Math.max(200,((100-v)*10000/100));pub(v);drawWave();}
 function emergencyStop(){emergency=true;var b=document.getElementById('emergBtn');b.classList.add('stopped');b.innerHTML='&#9632; PARADA ACTIVADA &mdash; Toca para reactivar';b.onclick=reactivar;pub(0);document.getElementById('slider').value=0;document.getElementById('pot').innerHTML='0 %';}
 function reactivar(){emergency=false;var b=document.getElementById('emergBtn');b.classList.remove('stopped');b.innerHTML='&#9632; PARADA DE EMERGENCIA';b.onclick=emergencyStop;}

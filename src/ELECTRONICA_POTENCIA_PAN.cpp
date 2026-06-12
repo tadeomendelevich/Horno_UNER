@@ -547,9 +547,30 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base, int32_t event_i
                 retardo_us = calcular_retardo_us(pw);
                 ESP_LOGI(TAG, "Potencia via MQTT: %d%%", pw);
             }
-            if (strstr(buf, "screen")) {
-                lcd_screen = (lcd_screen + 1) % LCD_NUM_SCREENS;
-                ESP_LOGI(TAG, "Pantalla LCD via MQTT: %d", lcd_screen);
+            // Joystick nav: {"nav":"up/down/left/right/ok"}
+            if (strstr(buf, "\"nav\"")) {
+                if (strstr(buf, ":\"up\"")) {
+                    int pw = (int)potencia_percent + 5;
+                    if (pw > 100) pw = 100;
+                    potencia_percent = pw;
+                    retardo_us = calcular_retardo_us(pw);
+                    ESP_LOGI(TAG, "Nav UP -> %d%%", pw);
+                } else if (strstr(buf, ":\"down\"")) {
+                    int pw = (int)potencia_percent - 5;
+                    if (pw < 0) pw = 0;
+                    potencia_percent = pw;
+                    retardo_us = calcular_retardo_us(pw);
+                    ESP_LOGI(TAG, "Nav DOWN -> %d%%", pw);
+                } else if (strstr(buf, ":\"right\"")) {
+                    lcd_screen = (lcd_screen + 1) % LCD_NUM_SCREENS;
+                    ESP_LOGI(TAG, "Nav RIGHT -> pantalla %d", lcd_screen);
+                } else if (strstr(buf, ":\"left\"")) {
+                    lcd_screen = (lcd_screen + LCD_NUM_SCREENS - 1) % LCD_NUM_SCREENS;
+                    ESP_LOGI(TAG, "Nav LEFT -> pantalla %d", lcd_screen);
+                } else if (strstr(buf, ":\"ok\"")) {
+                    lcd_screen = 0;
+                    ESP_LOGI(TAG, "Nav OK -> pantalla 0");
+                }
             }
             break;
         }
