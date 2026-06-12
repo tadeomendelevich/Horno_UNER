@@ -262,6 +262,19 @@ static void lcd_send_byte(uint8_t byte, uint8_t rs) {
 static void lcd_cmd(uint8_t cmd)         { lcd_send_byte(cmd,  0);      }
 static void lcd_char(uint8_t c)          { lcd_send_byte(c,    LCD_RS); }
 
+// Caracteres personalizados CGRAM — slot 0 (0x00) se evita para no confundir con null
+static const uint8_t cg_fill[8]   = {0x1F,0x1F,0x1F,0x1F,0x1F,0x1F,0x1F,0x00}; // \x01 bloque lleno
+static const uint8_t cg_empty[8]  = {0x00,0x00,0x00,0x1F,0x00,0x00,0x00,0x00}; // \x02 barra vacia
+static const uint8_t cg_thermo[8] = {0x04,0x0A,0x0A,0x0E,0x0E,0x1F,0x0E,0x00}; // \x03 termometro
+static const uint8_t cg_drop[8]   = {0x04,0x04,0x0A,0x11,0x11,0x11,0x0E,0x00}; // \x04 gota (humedad)
+static const uint8_t cg_wifi[8]   = {0x0E,0x11,0x0A,0x04,0x00,0x04,0x04,0x00}; // \x05 señal WiFi
+static const uint8_t cg_bolt[8]   = {0x0C,0x0C,0x0F,0x07,0x06,0x04,0x00,0x00}; // \x06 rayo TRIAC
+
+static void lcd_define_char(uint8_t slot, const uint8_t data[8]) {
+    lcd_cmd(0x40 | ((slot & 0x07) << 3));
+    for (int i = 0; i < 8; i++) lcd_char(data[i]);
+}
+
 static void lcd_init(void) {
     vTaskDelay(pdMS_TO_TICKS(50));
     lcd_send_nibble(0x03, 0); esp_rom_delay_us(5000);
@@ -274,6 +287,13 @@ static void lcd_init(void) {
     esp_rom_delay_us(2000);
     lcd_cmd(0x06);             // incrementar cursor
     lcd_cmd(0x0C);             // display on, cursor off
+    lcd_define_char(1, cg_fill);
+    lcd_define_char(2, cg_empty);
+    lcd_define_char(3, cg_thermo);
+    lcd_define_char(4, cg_drop);
+    lcd_define_char(5, cg_wifi);
+    lcd_define_char(6, cg_bolt);
+    lcd_cmd(0x80);             // volver a DDRAM
     ESP_LOGI(TAG, "LCD 1602 iniciado (0x%02X)", LCD_ADDR);
 }
 
@@ -922,45 +942,56 @@ static httpd_handle_t start_webserver(bool ap_mode_active)
 // ================= TAREA LCD =================
 static void lcd_update_task(void *pvParameters)
 {
-    char line0[17], line1[17];
-    bool btn_prev = true; // GPIO0 idle = HIGH (pull-up)
+    uint8_t line0[17], line1[17];
+    bool btn_prev = true;
 
     while (1) {
-        // Detectar flanco descendente del boton (presion)
         bool btn_now = gpio_get_level(BUTTON_PIN);
-        if (!btn_now && btn_prev) {
+        if (!btn_now && btn_prev)
             lcd_screen = (lcd_screen + 1) % LCD_NUM_SCREENS;
-        }
         btn_prev = btn_now;
 
         if (in_ap_mode) {
-            snprintf(line0, sizeof(line0), "%-16s", "Modo Config");
-            snprintf(line1, sizeof(line1), "%-16s", "192.168.4.1");
+            snprintf((char*)line0, 17, "%-16s", "  Modo Config   ");
+            snprintf((char*)line1, 17, "%-16s", " 192.168.4.1   ");
         } else {
             switch (lcd_screen) {
 
-                case 0: // Sensor + potencia
+                case 0: { // Temperatura + humedad | Barra de potencia
                     if (sensor_ok) {
-                        snprintf(line0, sizeof(line0), "T:%5.1fC H:%4.1f%%", last_temp, last_hum);
+                        snprintf((char*)line0, 17, "\x03%5.1f\xDFC \x04%5.1f%%",
+                                 last_temp, last_hum);
                     } else {
-                        snprintf(line0, sizeof(line0), "%-16s", "Sin sensor");
+                        snprintf((char*)line0, 17, "\x03 Sin sensor    ");
                     }
-                    snprintf(line1, sizeof(line1), "Potencia: %3d%%  ", (int)potencia_percent);
+                    // Barra: 10 bloques llenos/vacios + espacio + porcentaje
+                    int pct    = (int)potencia_percent;
+                    int filled = (pct * 10 + 50) / 100;
+                    for (int i = 0; i < 10; i++)
+                        line1[i] = (uint8_t)(i < filled ? 0x01 : 0x02);
+                    line1[10] = ' ';
+                    snprintf((char*)line1 + 11, 5, "%3d%%", pct);
+                    // pos 15 = '\0' → lcd_print_line rellena con espacio
                     break;
+                }
 
-                case 1: // Red
-                    snprintf(line0, sizeof(line0), "%-16.16s", g_ssid);
-                    snprintf(line1, sizeof(line1), "%-16s", g_ip);
+                case 1: { // Red WiFi + IP
+                    snprintf((char*)line0, 17, "\x05 %-14.14s", g_ssid);
+                    snprintf((char*)line1, 17, "%-16.15s",      g_ip);
                     break;
+                }
 
-                case 2: // TRIAC tecnico
-                    snprintf(line0, sizeof(line0), "ZC:%-13lu", (unsigned long)zero_cross_count);
-                    snprintf(line1, sizeof(line1), "Fire:%-11lu", (unsigned long)triac_fire_count);
+                case 2: { // Contadores tecnicos
+                    snprintf((char*)line0, 17, "\x06 ZC:%-10lu ",
+                             (unsigned long)zero_cross_count);
+                    snprintf((char*)line1, 17, "\x06 FR:%-10lu ",
+                             (unsigned long)triac_fire_count);
                     break;
+                }
             }
         }
-        lcd_print_line(0, line0);
-        lcd_print_line(1, line1);
+        lcd_print_line(0, (char*)line0);
+        lcd_print_line(1, (char*)line1);
         vTaskDelay(pdMS_TO_TICKS(300));
     }
 }
