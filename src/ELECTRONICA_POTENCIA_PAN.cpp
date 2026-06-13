@@ -50,7 +50,6 @@
 #define I2C_SCL             GPIO_NUM_22
 #define ZERO_CROSS_PIN      GPIO_NUM_27
 #define TRIAC_PIN           GPIO_NUM_18
-#define RELAY_PIN           GPIO_NUM_23
 
 // ================= AM2320 =================
 #define I2C_FREQ_HZ         100000
@@ -96,7 +95,6 @@ static volatile uint32_t triac_fire_count = 0;
 static float last_temp = 0.0f;
 static float last_hum  = 0.0f;
 static bool  sensor_ok = false;
-static volatile bool relay_state = false;
 
 // ================= NVS WIFI =================
 static bool nvs_load_wifi(char *ssid, char *pass)
@@ -417,17 +415,6 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base, int32_t event_i
                 retardo_us = calcular_retardo_us(pw);
                 ESP_LOGI(TAG, "Potencia via MQTT: %d%%", pw);
             }
-            if (strstr(buf, "\"relay\"")) {
-                if (strstr(buf, ":true")) {
-                    relay_state = true;
-                    gpio_set_level(RELAY_PIN, 1);
-                    ESP_LOGI(TAG, "Rele ON");
-                } else if (strstr(buf, ":false")) {
-                    relay_state = false;
-                    gpio_set_level(RELAY_PIN, 0);
-                    ESP_LOGI(TAG, "Rele OFF");
-                }
-            }
             break;
         }
 
@@ -464,13 +451,12 @@ static void mqtt_publish_task(void *pvParameters)
             snprintf(payload, sizeof(payload),
                 "{\"sensor_ok\":%s,\"temp\":%.1f,\"hum\":%.1f,\"power\":%d,"
                 "\"delay_us\":%d,\"pulse_us\":%d,\"semi_us\":%d,"
-                "\"zc\":%lu,\"fire\":%lu,\"relay\":%s}",
+                "\"zc\":%lu,\"fire\":%lu}",
                 sensor_ok ? "true" : "false",
                 last_temp, last_hum, (int)potencia_percent,
                 (int)retardo_us, TRIAC_PULSE_US, SEMICYCLE_US,
                 (unsigned long)zero_cross_count,
-                (unsigned long)triac_fire_count,
-                relay_state ? "true" : "false");
+                (unsigned long)triac_fire_count);
             esp_mqtt_client_publish(mqtt_client, TOPIC_DATA, payload, 0, 1, 0);
         }
         vTaskDelay(pdMS_TO_TICKS(2000));
@@ -812,15 +798,6 @@ extern "C" void app_main(void)
         ret = nvs_flash_init();
     }
     ESP_ERROR_CHECK(ret);
-
-    gpio_config_t relay_conf = {};
-    relay_conf.pin_bit_mask = (1ULL << RELAY_PIN);
-    relay_conf.mode         = GPIO_MODE_OUTPUT;
-    relay_conf.pull_up_en   = GPIO_PULLUP_DISABLE;
-    relay_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
-    relay_conf.intr_type    = GPIO_INTR_DISABLE;
-    gpio_config(&relay_conf);
-    gpio_set_level(RELAY_PIN, 0);
 
     i2c_init_am2320();
     triac_control_init();
