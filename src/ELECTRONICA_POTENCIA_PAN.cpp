@@ -272,8 +272,12 @@ static esp_err_t am2320_read(float *temperature, float *humidity)
 }
 
 // ================= LCD DRIVER =================
+static int lcd_fail_count = 0;
+
 static void lcd_write_byte(uint8_t data) {
-    i2c_master_transmit(lcd_dev, &data, 1, 100); // 100 ms — xfer_timeout_ms espera ms, no ticks
+    esp_err_t err = i2c_master_transmit(lcd_dev, &data, 1, 100);
+    if (err != ESP_OK) lcd_fail_count++;
+    else                lcd_fail_count = 0;
 }
 
 static void lcd_pulse_en(uint8_t data) {
@@ -1278,9 +1282,17 @@ static void lcd_update_task(void *pvParameters)
 
         memcpy(g_lcd_line0, line0, sizeof(g_lcd_line0));
         memcpy(g_lcd_line1, line1, sizeof(g_lcd_line1));
+        lcd_fail_count = 0;
         lcd_print_line(0, line0);
         lcd_print_line(1, line1);
-        vTaskDelay(pdMS_TO_TICKS(300));
+
+        if (lcd_fail_count > 8) {
+            ESP_LOGW(TAG, "LCD sin respuesta (%d fallos) — reset bus, reintento en 2s", lcd_fail_count);
+            i2c_master_bus_reset(i2c_bus_handle);
+            vTaskDelay(pdMS_TO_TICKS(2000));
+        } else {
+            vTaskDelay(pdMS_TO_TICKS(300));
+        }
     }
 }
 
