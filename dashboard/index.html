@@ -533,6 +533,22 @@ canvas{
       <article class="wide-card">
         <div class="card-head">
           <div>
+            <h2 class="card-title">Relé · GPIO23</h2>
+            <div class="card-sub">Control del transistor de propósito general. Estado sincronizado con el firmware.</div>
+          </div>
+          <div id="relayBadge" class="badge"><span class="dot err"></span><span>OFF</span></div>
+        </div>
+        <button id="relayBtn" class="btn" onclick="toggleRelay()" style="width:100%;padding:22px;font-size:1.2rem;font-weight:700;border-radius:20px;background:rgba(255,94,91,.1);border-color:rgba(255,94,91,.35);color:#ff8f8d;letter-spacing:.04em;">
+          ⏻ &nbsp;RELÉ APAGADO
+        </button>
+        <div style="margin-top:12px;color:var(--muted);font-size:12px;text-align:center;letter-spacing:.1em">
+          GPIO 23 · Se apaga al reiniciar el ESP32
+        </div>
+      </article>
+
+      <article class="wide-card">
+        <div class="card-head">
+          <div>
             <h2 class="card-title">Temporizado y contadores</h2>
             <div class="card-sub">Lectura tecnica del disparo por angulo de fase.</div>
           </div>
@@ -575,6 +591,7 @@ const OPTS = {
 let client = null;
 let navTimer = null;
 let emergency = false;
+let relayState = false;
 let lastData = {
   power: 0,
   delay_us: 10000,
@@ -595,7 +612,8 @@ let lastData = {
   ssid: "---",
   ip: "---",
   retry: 0,
-  uptime_s: 0
+  uptime_s: 0,
+  relay: false
 };
 
 function setBadge(id, cls, text) {
@@ -663,6 +681,31 @@ function navStop() {
   ["up","down","left","right"].forEach(dir => setNavButtonState(dir, false));
 }
 
+function toggleRelay() {
+  if (!client || !client.connected) return;
+  relayState = !relayState;
+  client.publish("horno/control", JSON.stringify({ relay: relayState }), { qos: 1 });
+  applyRelayUI(relayState);
+}
+
+function applyRelayUI(on) {
+  const btn = document.getElementById("relayBtn");
+  const badge = document.getElementById("relayBadge");
+  if (on) {
+    btn.style.background = "rgba(61,219,137,.14)";
+    btn.style.borderColor = "rgba(61,219,137,.45)";
+    btn.style.color = "#3ddb89";
+    btn.innerHTML = "⏻ &nbsp;RELÉ ENCENDIDO";
+    badge.innerHTML = '<span class="dot ok"></span><span>ON</span>';
+  } else {
+    btn.style.background = "rgba(255,94,91,.1)";
+    btn.style.borderColor = "rgba(255,94,91,.35)";
+    btn.style.color = "#ff8f8d";
+    btn.innerHTML = "⏻ &nbsp;RELÉ APAGADO";
+    badge.innerHTML = '<span class="dot err"></span><span>OFF</span>';
+  }
+}
+
 function emergencyStop() {
   emergency = true;
   setPower(0);
@@ -714,6 +757,10 @@ function renderData(data) {
   document.getElementById("debugValue").textContent = `Delay ${data.delay_us} us · Retry ${data.retry} · IP ${data.ip}`;
 
   setBadge("sensorBadge", data.sensor_ok ? "ok" : "err", data.sensor_ok ? "Sensor AM2320 OK" : "Sensor no detectado");
+  if (typeof data.relay !== "undefined") {
+    relayState = !!data.relay;
+    applyRelayUI(relayState);
+  }
   setBadge("modeBadge", data.ui_mode === "menu" ? "warn" : "ok", `Modo UI: ${data.ui_mode || "pages"} · ${data.menu_label || data.ui_page_name}`);
 
   drawWave(data);

@@ -52,6 +52,7 @@
 #define ZERO_CROSS_PIN      GPIO_NUM_27
 #define TRIAC_PIN           GPIO_NUM_18
 #define BUTTON_PIN          GPIO_NUM_0   // boton BOOT del DevKit (activo en LOW)
+#define RELAY_PIN           GPIO_NUM_23  // transistor/rele de proposito general
 
 // ================= AM2320 =================
 #define I2C_FREQ_HZ         100000
@@ -111,6 +112,7 @@ static volatile uint32_t triac_fire_count = 0;
 static float last_temp = 0.0f;
 static float last_hum  = 0.0f;
 static bool  sensor_ok = false;
+static volatile bool relay_state = false;
 
 typedef enum {
     UI_MODE_PAGES = 0,
@@ -543,7 +545,7 @@ static void build_status_json(char *out, size_t out_size)
         "\"zc\":%lu,\"fire\":%lu,\"mqtt\":%s,\"ap_mode\":%s,"
         "\"ui_mode\":\"%s\",\"ui_page\":%d,\"ui_page_name\":\"%s\","
         "\"menu_index\":%d,\"menu_label\":\"%s\",\"lcd_line0\":\"%s\",\"lcd_line1\":\"%s\","
-        "\"ssid\":\"%s\",\"ip\":\"%s\",\"retry\":%d,\"uptime_s\":%lu}",
+        "\"ssid\":\"%s\",\"ip\":\"%s\",\"retry\":%d,\"uptime_s\":%lu,\"relay\":%s}",
         sensor_ok ? "true" : "false",
         last_temp, last_hum, (int)potencia_percent,
         (int)retardo_us, TRIAC_PULSE_US, SEMICYCLE_US,
@@ -555,7 +557,8 @@ static void build_status_json(char *out, size_t out_size)
         (int)ui_page, page_esc,
         (int)ui_menu_index, menu_esc, line0_esc, line1_esc,
         ssid_esc, ip_esc, retry_count,
-        (unsigned long)get_uptime_s());
+        (unsigned long)get_uptime_s(),
+        relay_state ? "true" : "false");
 }
 
 // ================= INIT I2C =================
@@ -792,6 +795,18 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base, int32_t event_i
                 int pw = atoi(p);
                 set_power_percent(pw);
                 ESP_LOGI(TAG, "Potencia via MQTT: %d%%", pw);
+            }
+            // Rele GPIO23: {"relay":true} o {"relay":false}
+            if (strstr(buf, "\"relay\"")) {
+                if (strstr(buf, ":true")) {
+                    relay_state = true;
+                    gpio_set_level(RELAY_PIN, 1);
+                    ESP_LOGI(TAG, "Rele ON (GPIO23)");
+                } else if (strstr(buf, ":false")) {
+                    relay_state = false;
+                    gpio_set_level(RELAY_PIN, 0);
+                    ESP_LOGI(TAG, "Rele OFF (GPIO23)");
+                }
             }
             // Joystick nav: {"nav":"up/down/left/right/ok"}
             if (strstr(buf, "\"nav\"")) {
@@ -1339,6 +1354,16 @@ extern "C" void app_main(void)
     btn_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
     btn_conf.intr_type    = GPIO_INTR_DISABLE;
     gpio_config(&btn_conf);
+
+    gpio_config_t relay_conf = {};
+    relay_conf.pin_bit_mask = (1ULL << RELAY_PIN);
+    relay_conf.mode         = GPIO_MODE_OUTPUT;
+    relay_conf.pull_up_en   = GPIO_PULLUP_DISABLE;
+    relay_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
+    relay_conf.intr_type    = GPIO_INTR_DISABLE;
+    gpio_config(&relay_conf);
+    gpio_set_level(RELAY_PIN, 0);
+    ESP_LOGI(TAG, "Rele GPIO23 iniciado (OFF)");
 
     i2c_init_am2320();
 
