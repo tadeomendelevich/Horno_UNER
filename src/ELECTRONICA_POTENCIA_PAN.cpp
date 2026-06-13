@@ -7,6 +7,7 @@
 #include "freertos/event_groups.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
+#include "freertos/semphr.h"
 
 #include "esp_err.h"
 #include "esp_log.h"
@@ -91,6 +92,7 @@ static char g_pass[65] = {0};
 static i2c_master_bus_handle_t i2c_bus_handle;
 static i2c_master_dev_handle_t am2320_handle;
 static i2c_master_dev_handle_t lcd_dev;
+static SemaphoreHandle_t       i2c_mutex = NULL;
 
 // TRIAC
 static QueueHandle_t zero_cross_queue;
@@ -241,22 +243,33 @@ static esp_err_t am2320_read(float *temperature, float *humidity)
     uint8_t cmd[3] = {0x03, 0x00, 0x04};
     uint8_t data[8] = {0};
 
-    (void)i2c_master_probe(i2c_bus_handle, AM2320_ADDR, 50);
+    if (!i2c_mutex || xSemaphoreTake(i2c_mutex, pdMS_TO_TICKS(500)) != pdTRUE)
+        return ESP_ERR_TIMEOUT;
+
+    // Wakeup: usar handle de dispositivo (no i2c_master_probe) para respetar el mutex del bus
+    uint8_t wake = 0;
+    (void)i2c_master_transmit(am2320_handle, &wake, 1, 30); // NACK esperado
     esp_rom_delay_us(1000);
 
     esp_err_t ret = i2c_master_transmit(am2320_handle, cmd, sizeof(cmd), 100);
-    if (ret != ESP_OK) return ret;
+    if (ret != ESP_OK) { xSemaphoreGive(i2c_mutex); return ret; }
 
     esp_rom_delay_us(2000);
 
     ret = i2c_master_receive(am2320_handle, data, sizeof(data), 100);
-    if (ret != ESP_OK) return ret;
+    if (ret != ESP_OK) { xSemaphoreGive(i2c_mutex); return ret; }
 
-    if (data[0] != 0x03 || data[1] != 0x04) return ESP_ERR_INVALID_RESPONSE;
+    if (data[0] != 0x03 || data[1] != 0x04) {
+        xSemaphoreGive(i2c_mutex);
+        return ESP_ERR_INVALID_RESPONSE;
+    }
 
     uint16_t crc_rx   = data[6] | (data[7] << 8);
     uint16_t crc_calc = crc16_modbus(data, 6);
-    if (crc_rx != crc_calc) return ESP_ERR_INVALID_CRC;
+    if (crc_rx != crc_calc) {
+        xSemaphoreGive(i2c_mutex);
+        return ESP_ERR_INVALID_CRC;
+    }
 
     uint16_t raw_hum  = (data[2] << 8) | data[3];
     uint16_t raw_temp = (data[4] << 8) | data[5];
@@ -268,6 +281,7 @@ static esp_err_t am2320_read(float *temperature, float *humidity)
     } else {
         *temperature = raw_temp / 10.0f;
     }
+    xSemaphoreGive(i2c_mutex);
     return ESP_OK;
 }
 
@@ -1282,16 +1296,25 @@ static void lcd_update_task(void *pvParameters)
 
         memcpy(g_lcd_line0, line0, sizeof(g_lcd_line0));
         memcpy(g_lcd_line1, line1, sizeof(g_lcd_line1));
-        lcd_fail_count = 0;
-        lcd_print_line(0, line0);
-        lcd_print_line(1, line1);
 
-        if (lcd_fail_count > 8) {
-            ESP_LOGW(TAG, "LCD sin respuesta (%d fallos) — reset bus, reintento en 2s", lcd_fail_count);
-            i2c_master_bus_reset(i2c_bus_handle);
-            vTaskDelay(pdMS_TO_TICKS(2000));
+        if (i2c_mutex && xSemaphoreTake(i2c_mutex, pdMS_TO_TICKS(200)) == pdTRUE) {
+            lcd_fail_count = 0;
+            lcd_print_line(0, line0);
+            lcd_print_line(1, line1);
+            xSemaphoreGive(i2c_mutex);
+
+            if (lcd_fail_count > 8) {
+                ESP_LOGW(TAG, "LCD sin respuesta (%d fallos) — reset bus", lcd_fail_count);
+                if (xSemaphoreTake(i2c_mutex, pdMS_TO_TICKS(500)) == pdTRUE) {
+                    i2c_master_bus_reset(i2c_bus_handle);
+                    xSemaphoreGive(i2c_mutex);
+                }
+                vTaskDelay(pdMS_TO_TICKS(2000));
+            } else {
+                vTaskDelay(pdMS_TO_TICKS(300));
+            }
         } else {
-            vTaskDelay(pdMS_TO_TICKS(300));
+            vTaskDelay(pdMS_TO_TICKS(100)); // sensor esta usando el bus, reintentar pronto
         }
     }
 }
@@ -1299,6 +1322,9 @@ static void lcd_update_task(void *pvParameters)
 // ================= APP MAIN =================
 extern "C" void app_main(void)
 {
+    i2c_mutex = xSemaphoreCreateMutex();
+    configASSERT(i2c_mutex);
+
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP_ERROR_CHECK(nvs_flash_erase());
